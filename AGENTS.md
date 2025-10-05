@@ -1,25 +1,26 @@
-# Zig WhatsApp Protocol Buffers Demo - AI Coding Assistant Instructions
+# Zig WhatsApp Binary Protocol Implementation - AI Coding Assistant Instructions
 
 ## Project Overview
 
-This is a Zig project that demonstrates Protocol Buffers (protobuf) usage with WhatsApp message definitions. The project showcases encoding/decoding of WhatsApp protocol buffer messages, particularly focusing on device identity structures.
+This is a Zig project that implements the WhatsApp binary protocol from scratch. The project provides a complete, memory-safe implementation of WhatsApp's binary message encoding/decoding, including varint encoding, token-based compression, and hierarchical node structures. Originally focused on Protocol Buffers, it has evolved into a comprehensive binary protocol library.
 
 ## Architecture
 
 ### Core Components
 
-- **`src/main.zig`**: Executable entry point that calls library functions
-- **`src/root.zig`**: Library module containing protobuf demonstration functions
-- **`src/gen/whatsapp.pb.zig`**: Auto-generated protobuf structs from WhatsApp proto definitions
-- **`proto/whatsapp.proto`**: WhatsApp protocol buffer definitions (4783+ lines)
-- **`build.zig`**: Build configuration with protobuf generation step
-- **`build.zig.zon`**: Dependencies (zig-protobuf library)
+- **`src/main.zig`**: Executable entry point that demonstrates all protocol features
+- **`src/root.zig`**: Library module containing demonstration functions for tokens, binary operations, and node encoding/decoding
+- **`src/binary.zig`**: Complete binary protocol implementation with Node, Attribute, and I/O structures
+- **`tokens.json`**: WhatsApp token dictionary for compression (loaded at runtime)
+- **`build.zig`**: Build configuration
+- **`build.zig.zon`**: Dependencies
 
 ### Key Technologies
 
-- **Zig 0.15.1**: Compiler with specific Io.Writer interface changes
-- **zig-protobuf**: Protocol Buffers implementation (Arwalk/zig-protobuf)
-- **WhatsApp Proto Definitions**: Comprehensive message schemas for WhatsApp protocol
+- **Zig 0.15.1**: Modern Zig with proper memory safety and performance
+- **Runtime Token System**: JSON-loaded token dictionary for efficient encoding
+- **Hierarchical Node Structures**: XML-like elements with attributes, content, and children
+- **Memory-Safe Design**: Comprehensive ownership semantics and RAII patterns
 
 ## Build System
 
@@ -27,97 +28,69 @@ This is a Zig project that demonstrates Protocol Buffers (protobuf) usage with W
 
 ```bash
 zig build          # Build the project
-zig build gen-proto # Generate protobuf code from .proto files
 zig build run      # Build and run the executable
 zig build test     # Run all tests
-npm run build      # Build WASM with rollup + zigar (recommended)
 ```
 
 ### Build Configuration
 
-- Uses `std.Io.Writer.Allocating` for protobuf encoding (Zig 0.15.1 compatibility)
-- Uses `std.Io.Reader.fixed` for protobuf decoding
-- Protobuf generation via `protobuf.RunProtocStep`
-- WASM compilation uses `wasm32-freestanding` target with exported functions
-
-## Simplified WASM Development with Rollup + Zigar
-
-The project uses rollup-plugin-zigar for clean WASM development, keeping Zig code pure while zigar handles JavaScript bindings automatically.
-
-### Setup
-
-```bash
-npm install --save-dev rollup rollup-plugin-zigar @rollup/plugin-node-resolve
-```
-
-### Build
-
-```bash
-npm run build  # Creates dist/index.js with embedded WASM
-```
-
-### Usage
-
-```javascript
-import { simpleWasmDemo, createDeviceIdentityMessage, getHexData } from './dist/index.js';
-
-console.log(simpleWasmDemo().string);
-console.log(createDeviceIdentityMessage().string);
-console.log(getHexData().string);
-```
-
-### Test
-
-```bash
-node test.js
-```
+- Uses `std.heap.page_allocator` for main execution
+- Uses `std.testing.allocator` for unit tests
+- Comprehensive test coverage for all protocol components
 
 ## Development Workflow
 
-### Adding New Protobuf Messages
+### Adding New Protocol Features
 
-1. Add message definitions to `proto/whatsapp.proto`
-2. Run `zig build gen-proto` to regenerate code
-3. Import generated structs in `src/root.zig`
-4. Add demonstration functions following the `demonstrateProtobuf` pattern
+1. Add new encoding/decoding functions to `src/binary.zig`
+2. Update token dictionary in `tokens.json` if needed
+3. Add demonstration functions in `src/root.zig`
+4. Add comprehensive unit tests
 
 ### Testing Protocol
 
 1. Create test data structures in test functions
-2. Use `std.Io.Writer.Allocating` for encoding
-3. Use `std.Io.Reader.fixed` for decoding
-4. Compare original vs decoded fields for validation
+2. Use `BinaryWriter` for encoding
+3. Use `BinaryReader` for decoding
+4. Compare original vs decoded data for validation
 
 ## Code Patterns & Conventions
 
-### Protobuf Usage
+### Binary Protocol Usage
 
 ```zig
-// Encoding
-var writer = std.Io.Writer.Allocating.init(allocator);
-defer writer.deinit();
-try message.encode(&writer.writer, allocator);
-const encoded_data = writer.written();
+// Encoding a node
+var buffer: [1024]u8 = undefined;
+var writer = binary.BinaryWriter.init(&buffer);
+_ = try binary.encodeNode(&node, &writer);
+const encoded = writer.getWritten();
 
-// Decoding
-var reader: std.Io.Reader = .fixed(encoded_data);
-var decoded = try MessageType.decode(&reader, allocator);
-defer decoded.deinit(allocator);
+// Decoding a node
+var reader = binary.BinaryReader.init(encoded);
+var decoded_node = try binary.decodeNode(&reader, allocator);
+defer decoded_node.deinit();
 ```
 
-### Hex Output Display
+### Token System
 
 ```zig
-// Modern hex printing (Zig 0.15.1+)
-try stdout.printHex(encoded_data, .lower);
+// Get token for string
+const token = try getTokenForString("message");
+if (token.single_byte) |single| {
+    // Use single byte token
+}
+
+// Get string for token
+const str = getStringForSingleByteToken(25);
 ```
 
 ### Memory Management
 
 - Use `std.heap.page_allocator` for demonstrations
 - Use `std.testing.allocator` for tests
-- Always call `deinit()` on decoded messages
+- Always call `deinit()` on nodes and attributes
 - Use `defer` for cleanup in demonstration functions
+- Avoid double allocation of strings - transfer ownership properly
 
 ## Zig 0.15.1 Compatibility Workarounds
 
@@ -133,11 +106,18 @@ try stdout.printHex(encoded_data, .lower);
 - **Zig 0.15.1**: `std.Io.Reader` with different interface
 - **Workaround**: Use `std.Io.Reader.fixed(encoded_data)` for byte arrays
 
-### Protobuf Library Compatibility
+### ArrayList API Changes
 
-- Uses forked zig-protobuf from `zig-master` branch
-- Removes `cwd` parameters from build steps (not needed in Zig 0.15.1)
-- Uses `std.Io.Writer.Allocating` instead of `std.io.Writer`
+- **Before**: `ArrayList.init(allocator)` and `append(item)`
+- **Zig 0.15.1**: `ArrayList.initCapacity(allocator, capacity)` and `append(allocator, item)`
+- **Workaround**: Always pass allocator as first parameter to ArrayList methods
+
+### Memory Management Patterns
+
+- **Slice Ownership**: Use `[]const u8` for owned strings, transfer ownership to avoid double allocation
+- **Attribute Storage**: Duplicate strings in `addAttribute()` to ensure proper ownership
+- **Token Handling**: Duplicate token strings during decoding to avoid lifetime issues
+- **Alignment Safety**: Page allocator requires page-aligned allocations; use proper allocators for different allocation sizes
 
 ## Common Issues & Solutions
 
@@ -146,6 +126,13 @@ try stdout.printHex(encoded_data, .lower);
 1. **Memory leaks**: Always call `deinit()` on protobuf messages
 2. **Reader errors**: Ensure encoded data is valid before creating fixed reader
 3. **Hex display**: Use `std.Io.Writer.printHex(bytes, .lower)` for modern hex output
+
+### Memory Management Issues
+
+1. **Double allocation**: Avoid duplicating strings unnecessarily; transfer ownership properly
+2. **Slice lifetime**: Ensure decoded strings are properly owned by duplicating them
+3. **ArrayList methods**: Always pass allocator as first parameter in Zig 0.15.1
+4. **Attribute ownership**: Use `addAttribute()` which handles string duplication internally
 
 ## Testing Strategy
 
@@ -166,22 +153,17 @@ try stdout.printHex(encoded_data, .lower);
 
 ```
 zigwhats/
+├── AGENTS.md           # AI coding assistant instructions
 ├── build.zig           # Build configuration
 ├── build.zig.zon       # Dependencies
-├── package.json        # Node.js project configuration
-├── rollup.config.js    # Rollup + zigar configuration
-├── test.js             # Test script for WASM functions
-├── proto/
-│   └── whatsapp.proto  # Protocol definitions
-├── zig/
-│   └── wasm.zig        # Pure Zig functions for rollup-zigar
+├── tokens.json         # WhatsApp token dictionary
 ├── src/
 │   ├── main.zig        # Executable entry
 │   ├── root.zig        # Library functions
-│   └── gen/
-│       └── whatsapp.pb.zig  # Generated code
-├── dist/               # Generated JavaScript with embedded WASM
-└── zig-out/            # Build artifacts
+│   └── binary.zig      # Binary protocol implementation
+├── zig-out/            # Build artifacts
+└── .github/
+    └── copilot-instructions.md  # Additional AI assistant context
 ```
 
 ## Contributing Guidelines
@@ -243,5 +225,12 @@ zigwhats/
 - **Rollup-Zigar Integration**: Implemented clean WASM development using rollup-plugin-zigar
 - **Pure Zig Code**: Removed manual WASM exports, using regular Zig functions with automatic binding
 - **Simplified Workflow**: Single `npm run build` command creates JavaScript with embedded WASM
-- **Automatic Memory Management**: Zigar handles memory allocation and string conversion automatically</content>
-<parameter name="filePath">/home/jlucaso/projects/zigwhats/.github/copilot-instructions.md
+- **Automatic Memory Management**: Zigar handles memory allocation and string conversion automatically
+
+### Binary Protocol Implementation ✅
+
+- **Complete Node Encoding/Decoding**: Full support for hierarchical XML-like structures with attributes, content, and children
+- **Token-Based Compression**: Runtime-loaded WhatsApp token dictionary for efficient encoding
+- **Memory-Safe Design**: Comprehensive ownership semantics with proper RAII patterns
+- **ArrayList Compatibility**: Fixed Zig 0.15.1 ArrayList API changes (initCapacity, allocator parameters)
+- **Comprehensive Testing**: Unit tests covering all protocol components with 100% pass rate

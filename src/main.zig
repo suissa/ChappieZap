@@ -4,6 +4,8 @@ const zig = @import("zig");
 pub fn main() !void {
     try zig.demonstrateProtobuf();
     try zig.demonstrateBinary();
+    try zig.demonstrateTokensAndNodes();
+    try zig.demonstrateJidsAndChildren();
 }
 
 test "simple test" {
