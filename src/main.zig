@@ -6,6 +6,7 @@ pub fn main() !void {
     try zig.demonstrateBinary();
     try zig.demonstrateTokensAndNodes();
     try zig.demonstrateJidsAndChildren();
+    try zig.demonstrateWebSocket();
 }
 
 test "simple test" {

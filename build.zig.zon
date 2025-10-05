@@ -12,6 +12,10 @@
             .url = "git+https://github.com/Arwalk/zig-protobuf?ref=zig-master#7b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
             .hash = "protobuf-2.0.0-0e82aumeKACdoSpF0EnvI-VBEES8szKOs2d4xmAMLcaf",
         },
+        .websocket = .{
+            .url = "git+https://github.com/karlseguin/websocket.zig#2d9ae9b0905c4f902dafabb073ebd54065e839b4",
+            .hash = "websocket-0.1.0-ZPISdbxyAwB8d7my8K95rTDLQjbnw9LEycVFA5QjbW5t",
+        },
     },
     .paths = .{
         "build.zig",

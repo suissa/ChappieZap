@@ -10,9 +10,28 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const websocket_dep = b.dependency("websocket", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     const binary_mod = b.addModule("binary", .{
         .root_source_file = b.path("src/binary.zig"),
         .target = target,
+    });
+
+    const websocket_mod = b.addModule("websocket", .{
+        .root_source_file = websocket_dep.path("src/websocket.zig"),
+        .target = target,
+    });
+
+    const whatsapp_ws_mod = b.addModule("whatsapp_websocket", .{
+        .root_source_file = b.path("src/whatsapp_websocket.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "websocket", .module = websocket_mod },
+            .{ .name = "binary", .module = binary_mod },
+        },
     });
 
     const mod = b.addModule("zig", .{
@@ -21,6 +40,8 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "protobuf", .module = protobuf_dep.module("protobuf") },
             .{ .name = "binary", .module = binary_mod },
+            .{ .name = "websocket", .module = websocket_mod },
+            .{ .name = "whatsapp_websocket", .module = whatsapp_ws_mod },
         },
     });
 

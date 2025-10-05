@@ -2,6 +2,7 @@ const std = @import("std");
 const protobuf = @import("protobuf");
 const whatsapp = @import("gen/whatsapp.pb.zig");
 const binary = @import("binary");
+const whatsapp_ws = @import("whatsapp_websocket");
 
 pub fn demonstrateProtobuf() !void {
     const allocator = std.heap.page_allocator;
@@ -263,6 +264,11 @@ pub fn demonstrateJidsAndChildren() !void {
     }
 
     try stdout.flush();
+}
+
+pub fn demonstrateWebSocket() !void {
+    const allocator = std.heap.page_allocator;
+    try whatsapp_ws.demonstrateWebSocket(allocator);
 }
 
 test "protobuf encoding/decoding" {
