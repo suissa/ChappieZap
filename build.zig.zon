@@ -1,0 +1,21 @@
+.{
+    .name = .zigwhats,
+
+    .version = "0.0.0",
+
+    .fingerprint = 0x2d47bab584678687,
+
+    .minimum_zig_version = "0.15.1",
+
+    .dependencies = .{
+        .protobuf = .{
+            .url = "git+https://github.com/Arwalk/zig-protobuf?ref=zig-master#7b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+            .hash = "protobuf-2.0.0-0e82aumeKACdoSpF0EnvI-VBEES8szKOs2d4xmAMLcaf",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
