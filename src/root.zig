@@ -198,9 +198,7 @@ pub fn demonstrateJidsAndChildren() !void {
         if (jid.integrator > 0) {
             try stdout.print(", integrator={}", .{jid.integrator});
         }
-        try stdout.print(" (group: {}, broadcast: {}, interop: {}, messenger: {})\n", .{ 
-            jid.isGroup(), jid.isBroadcast(), jid.isInterop(), jid.isMessenger() 
-        });
+        try stdout.print(" (group: {}, broadcast: {}, interop: {}, messenger: {})\n", .{ jid.isGroup(), jid.isBroadcast(), jid.isInterop(), jid.isMessenger() });
     }
 
     // Demonstrate node with children
