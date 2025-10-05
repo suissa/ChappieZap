@@ -10,11 +10,17 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const binary_mod = b.addModule("binary", .{
+        .root_source_file = b.path("src/binary.zig"),
+        .target = target,
+    });
+
     const mod = b.addModule("zig", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .imports = &.{
             .{ .name = "protobuf", .module = protobuf_dep.module("protobuf") },
+            .{ .name = "binary", .module = binary_mod },
         },
     });
 

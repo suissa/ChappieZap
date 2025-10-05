@@ -1,6 +1,7 @@
 const std = @import("std");
 const protobuf = @import("protobuf");
 const whatsapp = @import("gen/whatsapp.pb.zig");
+const binary = @import("binary");
 
 pub fn demonstrateProtobuf() !void {
     const allocator = std.heap.page_allocator;
@@ -71,6 +72,47 @@ pub fn demonstrateProtobufToString(allocator: std.mem.Allocator) ![]u8 {
 
     const result_len = fbs.pos;
     return allocator.dupe(u8, buffer[0..result_len]);
+}
+
+pub fn demonstrateBinary() !void {
+    const allocator = std.heap.page_allocator;
+
+    // Demonstrate varint encoding/decoding
+    var buffer: [20]u8 = undefined;
+    var writer = binary.BinaryWriter.init(&buffer);
+
+    const value: u64 = 123456789;
+    const bytes_written = try binary.encodeVarint(value, &writer);
+    const encoded = writer.getWritten();
+
+    var reader = binary.BinaryReader.init(encoded);
+    const decoded = try binary.decodeVarint(&reader);
+
+    // Demonstrate string encoding/decoding
+    var str_buffer: [100]u8 = undefined;
+    var str_writer = binary.BinaryWriter.init(&str_buffer);
+
+    const test_string = "Hello, WhatsApp Binary Protocol! 🚀";
+    const str_bytes_written = try binary.encodeString(test_string, &str_writer);
+    const str_encoded = str_writer.getWritten();
+
+    var str_reader = binary.BinaryReader.init(str_encoded);
+    const decoded_string = try binary.decodeString(&str_reader, allocator);
+    defer allocator.free(decoded_string);
+
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    const stdout = &stdout_writer.interface;
+
+    try stdout.print("Binary demo: Varint {} encoded in {} bytes: ", .{ value, bytes_written });
+    for (encoded) |byte| {
+        try stdout.print("{x:0>2}", .{byte});
+    }
+    try stdout.print(" -> decoded: {}\n", .{decoded});
+
+    try stdout.print("Binary demo: String '{s}' encoded in {} bytes\n", .{ test_string, str_bytes_written });
+    try stdout.print("Binary demo: Decoded string: '{s}'\n", .{decoded_string});
+    try stdout.flush();
 }
 
 test "protobuf encoding/decoding" {

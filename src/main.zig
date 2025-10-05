@@ -3,6 +3,7 @@ const zig = @import("zig");
 
 pub fn main() !void {
     try zig.demonstrateProtobuf();
+    try zig.demonstrateBinary();
 }
 
 test "simple test" {
