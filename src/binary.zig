@@ -49,66 +49,45 @@ pub const LIST_8: u8 = 248;
 pub const LIST_16: u8 = 249;
 pub const PACKED_MAX: u8 = 127;
 
-/// Token dictionary loaded from JSON at compile time
-const tokens_json = @embedFile("tokens.json");
+/// Compile-time token system using StaticStringMap for O(n/L) lookups
+/// This replaces runtime JSON parsing with compile-time initialization
+const TokenData = struct {
+    page: u8,
+    index: u8,
+};
 
-/// Parse tokens at runtime (for now, until comptime allocator works)
-var parsed_tokens: ?std.json.Value = null;
-var single_byte_tokens: ?std.json.Array = null;
-var double_byte_tokens: ?std.json.Array = null;
+// Import generated token data
+const tokens_gen = @import("gen/tokens_generated.zig");
 
-/// Initialize tokens by parsing JSON
-pub fn initTokens(allocator: std.mem.Allocator) !void {
-    if (parsed_tokens != null) return;
+/// Token data initialized at compile time from generated code
+const token_data = tokens_gen.token_data;
 
-    // Use arena allocator for JSON parsing to avoid fragmentation
-    // Note: we don't deinit the arena, so memory leaks, but for demo it's fine
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    // defer arena.deinit(); // Don't deinit to keep the memory alive
-    const arena_allocator = arena.allocator();
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, arena_allocator, tokens_json, .{});
-    parsed_tokens = parsed.value;
-    single_byte_tokens = parsed_tokens.?.object.get("single_byte").?.array;
-    double_byte_tokens = parsed_tokens.?.object.get("double_byte").?.array;
+/// Initialize tokens (no-op since everything is compile-time)
+pub fn initTokens(_: std.mem.Allocator) !void {
+    // No-op: all token data is initialized at compile time
 }
 
-/// Get single byte token for a string
+/// Get single byte token for a string - O(n/L) lookup via StaticStringMap
 pub fn getSingleByteToken(str: []const u8) ?u8 {
-    if (single_byte_tokens == null) return null;
-    for (single_byte_tokens.?.items, 0..) |token_value, i| {
-        if (std.mem.eql(u8, token_value.string, str)) {
-            return @as(u8, @intCast(i));
-        }
-    }
-    return null;
+    return token_data.single_map.get(str);
 }
 
-/// Get double byte token for a string
+/// Get double byte token for a string - O(n/L) lookup via StaticStringMap
 pub fn getDoubleByteToken(str: []const u8) ?struct { u8, u8 } {
-    if (double_byte_tokens == null) return null;
-    for (double_byte_tokens.?.items, 0..) |page, page_idx| {
-        for (page.array.items, 0..) |token_value, token_idx| {
-            if (std.mem.eql(u8, token_value.string, str)) {
-                return .{ @as(u8, @intCast(page_idx)), @as(u8, @intCast(token_idx)) };
-            }
-        }
-    }
-    return null;
+    const data = token_data.double_map.get(str) orelse return null;
+    return .{ data.page, data.index };
 }
 
-/// Get string for single byte token
+/// Get string for single byte token - O(1) array lookup
 pub fn getStringForSingleByteToken(token: u8) ?[]const u8 {
-    if (single_byte_tokens == null or token >= single_byte_tokens.?.items.len) return null;
-    return single_byte_tokens.?.items[token].string;
+    if (token >= token_data.single_reverse.len) return null;
+    return token_data.single_reverse[token];
 }
 
-/// Get string for double byte token
+/// Get string for double byte token - O(1) array lookup
 pub fn getStringForDoubleByteToken(page: u8, token: u8) ?[]const u8 {
-    if (double_byte_tokens == null or page >= double_byte_tokens.?.items.len) return null;
-    const page_items = double_byte_tokens.?.items[page].array.items;
-    if (token >= page_items.len) return null;
-    return page_items[token].string;
+    if (page >= token_data.double_reverse.len) return null;
+    return token_data.double_reverse[page][token];
 }
 
 /// Write a string using token compression when possible
