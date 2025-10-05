@@ -29,10 +29,48 @@ pub fn demonstrateProtobuf() !void {
 
     try stdout.print("Protobuf demo: Encoded {} bytes\n", .{encoded_data.len});
     try stdout.print("Protobuf demo: Hex data: ", .{});
-    try stdout.printHex(encoded_data, .lower);
+    for (encoded_data) |byte| {
+        try stdout.print("{x:0>2}", .{byte});
+    }
     try stdout.print("\n", .{});
     try stdout.print("Protobuf demo: Successfully encoded and decoded ADVDeviceIdentity message!\n", .{});
     try stdout.flush();
+}
+
+pub fn demonstrateProtobufToString(allocator: std.mem.Allocator) ![]u8 {
+    var device = whatsapp.ADVDeviceIdentity{
+        .rawId = 12345,
+        .timestamp = 1640995200,
+        .keyIndex = 1,
+        .accountType = .E2EE,
+        .deviceType = .E2EE,
+    };
+
+    var writer = std.Io.Writer.Allocating.init(allocator);
+    defer writer.deinit();
+    try device.encode(&writer.writer, allocator);
+
+    const encoded_data = writer.written();
+
+    var reader: std.Io.Reader = .fixed(encoded_data);
+    var decoded_device = try whatsapp.ADVDeviceIdentity.decode(&reader, allocator);
+    defer decoded_device.deinit(allocator);
+
+    // Create a string buffer for the result
+    var buffer: [1024]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buffer);
+    const result_writer = fbs.writer();
+
+    try result_writer.print("Protobuf demo: Encoded {} bytes\n", .{encoded_data.len});
+    try result_writer.print("Protobuf demo: Hex data: ", .{});
+    for (encoded_data) |byte| {
+        try result_writer.print("{x:0>2}", .{byte});
+    }
+    try result_writer.print("\n", .{});
+    try result_writer.print("Protobuf demo: Successfully encoded and decoded ADVDeviceIdentity message!\n", .{});
+
+    const result_len = fbs.pos;
+    return allocator.dupe(u8, buffer[0..result_len]);
 }
 
 test "protobuf encoding/decoding" {

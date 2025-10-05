@@ -30,6 +30,7 @@ zig build          # Build the project
 zig build gen-proto # Generate protobuf code from .proto files
 zig build run      # Build and run the executable
 zig build test     # Run all tests
+npm run build      # Build WASM with rollup + zigar (recommended)
 ```
 
 ### Build Configuration
@@ -37,6 +38,39 @@ zig build test     # Run all tests
 - Uses `std.Io.Writer.Allocating` for protobuf encoding (Zig 0.15.1 compatibility)
 - Uses `std.Io.Reader.fixed` for protobuf decoding
 - Protobuf generation via `protobuf.RunProtocStep`
+- WASM compilation uses `wasm32-freestanding` target with exported functions
+
+## Simplified WASM Development with Rollup + Zigar
+
+The project uses rollup-plugin-zigar for clean WASM development, keeping Zig code pure while zigar handles JavaScript bindings automatically.
+
+### Setup
+
+```bash
+npm install --save-dev rollup rollup-plugin-zigar @rollup/plugin-node-resolve
+```
+
+### Build
+
+```bash
+npm run build  # Creates dist/index.js with embedded WASM
+```
+
+### Usage
+
+```javascript
+import { simpleWasmDemo, createDeviceIdentityMessage, getHexData } from './dist/index.js';
+
+console.log(simpleWasmDemo().string);
+console.log(createDeviceIdentityMessage().string);
+console.log(getHexData().string);
+```
+
+### Test
+
+```bash
+node test.js
+```
 
 ## Development Workflow
 
@@ -134,13 +168,19 @@ try stdout.printHex(encoded_data, .lower);
 zigwhats/
 ├── build.zig           # Build configuration
 ├── build.zig.zon       # Dependencies
+├── package.json        # Node.js project configuration
+├── rollup.config.js    # Rollup + zigar configuration
+├── test.js             # Test script for WASM functions
 ├── proto/
 │   └── whatsapp.proto  # Protocol definitions
+├── zig/
+│   └── wasm.zig        # Pure Zig functions for rollup-zigar
 ├── src/
 │   ├── main.zig        # Executable entry
 │   ├── root.zig        # Library functions
 │   └── gen/
 │       └── whatsapp.pb.zig  # Generated code
+├── dist/               # Generated JavaScript with embedded WASM
 └── zig-out/            # Build artifacts
 ```
 
@@ -185,5 +225,23 @@ zigwhats/
 - Implement streaming protobuf operations
 - Add JSON serialization support
 - Create benchmarking suite for protobuf performance
-- Add fuzz testing for message parsing</content>
+- Add fuzz testing for message parsing
+- Create HTML/JavaScript wrapper for WASM module testing
+- Implement full protobuf functionality in WASM-compatible version
+- Optimize WASM binary size with build options
+
+## Recent Updates
+
+### Zig 0.15.1 Compatibility ✅
+
+- **Hex Printing**: Replaced manual hex loops with `std.fmt.format` using `{x:0>2}` format specifier
+- **Io.Writer Interface**: Using `std.Io.Writer.Allocating` with `&writer.writer` access pattern
+- **Io.Reader Interface**: Using `std.Io.Reader.fixed(encoded_data)` for byte arrays
+
+### WebAssembly Compilation ✅
+
+- **Rollup-Zigar Integration**: Implemented clean WASM development using rollup-plugin-zigar
+- **Pure Zig Code**: Removed manual WASM exports, using regular Zig functions with automatic binding
+- **Simplified Workflow**: Single `npm run build` command creates JavaScript with embedded WASM
+- **Automatic Memory Management**: Zigar handles memory allocation and string conversion automatically</content>
 <parameter name="filePath">/home/jlucaso/projects/zigwhats/.github/copilot-instructions.md

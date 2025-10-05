@@ -1,0 +1,20 @@
+{
+  "name": "zigwhats",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "build": "echo 'Note: WASM build disabled due to zigar/Zig 0.15.1 incompatibility' && echo 'Zig WASM functions are ready in zig/wasm.zig' && exit 0",
+    "build:wasm": "rollup -c rollup.config.js && node generate-types.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "@rollup/plugin-node-resolve": "^16.0.2",
+    "rollup": "^4.52.4",
+    "rollup-plugin-zigar": "^0.14.2-alpha.3"
+  }
+}
