@@ -46,11 +46,26 @@ pub const Client = struct {
     registration_id: u32,
     adv_secret_key: [32]u8,
     app_version: AppVersion = .{},
+    sessions: std.ArrayList(SessionEntry) = .empty,
+    _last_msg_text: ?[]u8 = null,
 
     const AppVersion = struct {
         primary: u32 = 2,
         secondary: u32 = 3000,
         tertiary: u32 = 1037005288,
+    };
+
+    const SessionEntry = struct {
+        jid: []u8,
+        session: signal.Session,
+    };
+
+    /// Parameters for the PreKeySignalMessage wrapper.
+    pub const PreKeyMsgParams = struct {
+        registration_id: u32,
+        prekey_id: ?u32,
+        signed_prekey_id: u32,
+        base_key: [32]u8,
     };
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, options: ClientOptions) !Client {
@@ -77,6 +92,12 @@ pub const Client = struct {
     }
 
     pub fn deinit(self: *Client) void {
+        if (self._last_msg_text) |t| self.allocator.free(t);
+        for (self.sessions.items) |*entry| {
+            self.allocator.free(entry.jid);
+            entry.session.deinit();
+        }
+        self.sessions.deinit(self.allocator);
         if (self.lid) |lid| self.allocator.free(lid);
         if (self.phone_jid) |pj| self.allocator.free(pj);
         if (self.noise_socket) |*ns| ns.deinit();
@@ -88,11 +109,8 @@ pub const Client = struct {
     /// Full connection flow: pair → reconnect → login → prekeys → event loop.
     /// Blocks until disconnected. Dispatches events to the handler.
     pub fn connectAndRun(self: *Client) !void {
-        // Phase 1: Pairing (first connection)
         try self.connectWithPayload(.pairing);
         try self.handlePairingFlow();
-
-        // Phase 2: Reconnect as returning login
         try self.connectWithPayload(.login);
         try self.readUntilLogin();
 
@@ -101,11 +119,9 @@ pub const Client = struct {
             .lid = self.lid orelse "",
         } });
 
-        // Phase 3: Post-login setup
         self.sendActive();
         self.uploadPrekeys() catch {};
 
-        // Phase 4: Message loop (blocks forever)
         self.runMessageLoop();
     }
 
@@ -120,80 +136,62 @@ pub const Client = struct {
         self.uploadPrekeys() catch {};
     }
 
-    /// Send a text message to a JID.
-    pub fn sendText(self: *Client, to: []const u8, text: []const u8) !void {
-        const plaintext = try messaging.encodeTextMessage(self.allocator, text);
-        defer self.allocator.free(plaintext);
-
-        // For now, send unencrypted (mock server doesn't validate)
-        // TODO: proper Signal encryption with session management
-        const msg_id_arr = messaging.generateMessageId(self.io);
-        var msg_node = try messaging.buildMessageNode(self.allocator, to, &msg_id_arr, plaintext, false);
-        defer msg_node.deinit();
-        try self.sendNode(&msg_node);
+    /// Send a text message to a JID. Handles session management automatically:
+    /// fetches prekeys and establishes a session if needed, then encrypts and sends.
+    pub fn sendMessage(self: *Client, to_jid: []const u8, text: []const u8) !void {
+        if (self.findSession(to_jid) != null) {
+            return self.sendEncrypted(to_jid, text, null);
+        }
+        // No session yet — fetch prekeys, create session, send as pkmsg
+        const bundle = try self.fetchPrekeys(to_jid);
+        const pk_params = try self.createSession(to_jid, bundle);
+        return self.sendEncrypted(to_jid, text, pk_params);
     }
 
-    /// Send a text message with Signal encryption.
-    pub fn sendTextMessage(
-        self: *Client,
-        session: *signal.Session,
-        to_jid: []const u8,
-        text: []const u8,
-        is_prekey_msg: bool,
-    ) !void {
-        const plaintext = try messaging.encodeTextMessage(self.allocator, text);
-        defer self.allocator.free(plaintext);
-        var encrypted_msg = try session.encrypt(self.allocator, plaintext, self.io);
-        defer encrypted_msg.deinit(self.allocator);
-        const signal_msg_bytes = try signal.message.serializeSignalMessage(self.allocator, &encrypted_msg);
-        defer self.allocator.free(signal_msg_bytes);
-
-        var ciphertext: []u8 = undefined;
-        if (is_prekey_msg) {
-            ciphertext = try signal.message.serializePreKeySignalMessage(
-                self.allocator,
-                self.registration_id,
-                self.prekeys[0].id,
-                self.signed_prekey.id,
-                self.identity.key_pair.public,
-                self.identity.key_pair.public,
-                signal_msg_bytes,
-            );
-        } else {
-            ciphertext = try self.allocator.dupe(u8, signal_msg_bytes);
+    /// Wait for an incoming message containing the expected text.
+    /// Reads and processes nodes until the text matches or timeout.
+    pub fn waitForText(self: *Client, expected: []const u8, timeout_ms: u32) !void {
+        var attempts: usize = 0;
+        while (attempts < 100) : (attempts += 1) {
+            var node = self.receiveNodeTimeout(timeout_ms) catch continue;
+            defer node.deinit();
+            self.processNode(&node);
+            if (self._last_msg_text) |text| {
+                if (std.mem.eql(u8, text, expected)) return;
+            }
         }
-        defer self.allocator.free(ciphertext);
-
-        const msg_id_arr = messaging.generateMessageId(self.io);
-        var msg_node = try messaging.buildMessageNode(self.allocator, to_jid, &msg_id_arr, ciphertext, is_prekey_msg);
-        defer msg_node.deinit();
-        try self.sendNode(&msg_node);
+        return error.TextNotFound;
     }
 
     pub fn isConnected(self: *const Client) bool {
         return self.noise_socket != null and self.is_logged_in;
     }
 
-    /// Wait for a message node (for tests). Processes other nodes.
-    /// Wait for an incoming message, processing other nodes.
-    /// timeout_ms per read attempt. max_attempts total reads.
-    pub fn waitForMessage(self: *Client, max_attempts: usize) !binary.Node {
-        return self.waitForMessageTimeout(max_attempts, 30_000);
-    }
+    fn decryptMessageNode(self: *Client, node: *const binary.Node) ?[]u8 {
+        const children = node.getContentNodes() orelse return null;
+        const from_jid = node.getAttribute("from") orelse return null;
 
-    pub fn waitForMessageTimeout(self: *Client, max_attempts: usize, timeout_ms: u32) !binary.Node {
-        var attempts: usize = 0;
-        while (attempts < max_attempts) : (attempts += 1) {
-            var node = self.receiveNodeTimeout(timeout_ms) catch |err| {
-                // Timeout just means no data yet — keep trying
-                if (attempts + 1 < max_attempts) continue;
-                return err;
+        for (children) |*child| {
+            if (!std.mem.eql(u8, child.tag, "enc")) continue;
+            const enc_type = child.getAttribute("type") orelse continue;
+            const ciphertext = child.getContentBytes() orelse {
+                log.debug("Client/Decrypt", "enc type={s}: no content bytes", .{enc_type});
+                continue;
             };
-            if (std.mem.eql(u8, node.tag, "message")) return node;
-            self.processNode(&node);
-            node.deinit();
+
+            if (std.mem.eql(u8, enc_type, "pkmsg")) {
+                return self.decryptPreKeyMessage(from_jid, ciphertext) catch |err| {
+                    log.warn("Client/Decrypt", "pkmsg decrypt failed: {}", .{err});
+                    return null;
+                };
+            } else if (std.mem.eql(u8, enc_type, "msg")) {
+                return self.decryptSessionMessage(from_jid, ciphertext) catch |err| {
+                    log.warn("Client/Decrypt", "msg decrypt failed: {}", .{err});
+                    return null;
+                };
+            }
         }
-        return error.MessageTimeout;
+        return null;
     }
 
     // --- Internal: Connection ---
@@ -254,7 +252,6 @@ pub const Client = struct {
 
     fn buildPairingPayload(self: *Client) ![]u8 {
         const pd = try pair_mod.buildPairingData(
-            self.allocator,
             self.identity,
             self.signed_prekey,
             self.registration_id,
@@ -292,67 +289,32 @@ pub const Client = struct {
         }
 
         // Encode DeviceProps protobuf
-        const device_props = whatsapp.DeviceProps{
-            // Match the Rust reference exactly. This field alone accounts for the
-            // 1-byte ClientFinish delta seen against the real server.
-            .os = "rust",
-            .version = .{ .primary = 0, .secondary = 1, .tertiary = 0 },
-            .platformType = .UNKNOWN,
-            .requireFullSync = true,
-            .historySyncConfig = .{
-                .fullSyncDaysLimit = 30,
-                .inlineInitialPayloadInE2EeMsg = true,
-                .storageQuotaMb = 10240,
-                .supportMessageAssociation = true,
-            },
-        };
+        const device_props = pair_mod.makePairingDeviceProps();
         var dp_writer = std.Io.Writer.Allocating.init(self.allocator);
         defer dp_writer.deinit();
         try device_props.encode(&dp_writer.writer, self.allocator);
-        const dp_bytes = dp_writer.written();
-        const dp_owned = try self.allocator.dupe(u8, dp_bytes);
+        const dp_owned = try dp_writer.toOwnedSlice();
         defer self.allocator.free(dp_owned);
 
-        var payload = whatsapp.ClientPayload{
-            .passive = false,
-            .pull = false,
-            .userAgent = .{
-                .platform = .WEB,
-                .releaseChannel = .RELEASE,
-                .appVersion = .{
-                    .primary = self.app_version.primary,
-                    .secondary = self.app_version.secondary,
-                    .tertiary = self.app_version.tertiary,
-                },
-                .mcc = "000",
-                .mnc = "000",
-                .osVersion = "0.1.0",
-                .manufacturer = "",
-                .device = "Desktop",
-                .osBuildNumber = "0.1.0",
-                .localeLanguageIso6391 = "en",
-                .localeCountryIso31661Alpha2 = "en",
-            },
-            .webInfo = .{ .webSubPlatform = .WEB_BROWSER },
-            .connectType = .WIFI_UNKNOWN,
-            .connectReason = .USER_ACTIVATED,
-            .devicePairingData = .{
-                .eRegid = &pd.e_regid,
-                .eKeytype = &pd.e_keytype,
-                .eIdent = &pd.e_ident,
-                .eSkeyId = &pd.e_skey_id,
-                .eSkeyVal = &pd.e_skey_val,
-                .eSkeySig = &pd.e_skey_sig,
-                .buildHash = &pd.build_hash,
-                .deviceProps = dp_owned,
-            },
+        var payload = self.makeBasePayload();
+        payload.passive = false;
+        payload.pull = false;
+        payload.devicePairingData = .{
+            .eRegid = &pd.e_regid,
+            .eKeytype = &pd.e_keytype,
+            .eIdent = &pd.e_ident,
+            .eSkeyId = &pd.e_skey_id,
+            .eSkeyVal = &pd.e_skey_val,
+            .eSkeySig = &pd.e_skey_sig,
+            .buildHash = &pd.build_hash,
+            .deviceProps = dp_owned,
         };
         _ = &payload;
 
         var writer = std.Io.Writer.Allocating.init(self.allocator);
         defer writer.deinit();
         try payload.encode(&writer.writer, self.allocator);
-        return self.allocator.dupe(u8, writer.written());
+        return writer.toOwnedSlice();
     }
 
     /// Build login payload for reconnect — includes username (phone) and device ID.
@@ -368,43 +330,23 @@ pub const Client = struct {
 
         log.debug("Client", "Building login payload: username={?}, device={d}", .{ username, self.device_id });
 
-        var payload = whatsapp.ClientPayload{
-            .passive = true, // returning login is passive
-            .username = username,
-            .device = self.device_id,
-            .userAgent = .{
-                .platform = .WEB,
-                .releaseChannel = .RELEASE,
-                .appVersion = .{
-                    .primary = self.app_version.primary,
-                    .secondary = self.app_version.secondary,
-                    .tertiary = self.app_version.tertiary,
-                },
-                .mcc = "000",
-                .mnc = "000",
-                .osVersion = "0.1.0",
-                .manufacturer = "",
-                .device = "Desktop",
-                .osBuildNumber = "0.1.0",
-                .localeLanguageIso6391 = "en",
-                .localeCountryIso31661Alpha2 = "en",
-            },
-            .webInfo = .{ .webSubPlatform = .WEB_BROWSER },
-            .connectType = .WIFI_UNKNOWN,
-            .connectReason = .USER_ACTIVATED,
-        };
+        var payload = self.makeBasePayload();
+        payload.passive = true; // returning login is passive
+        payload.username = username;
+        payload.device = self.device_id;
         _ = &payload;
 
         var writer = std.Io.Writer.Allocating.init(self.allocator);
         defer writer.deinit();
         try payload.encode(&writer.writer, self.allocator);
-        return self.allocator.dupe(u8, writer.written());
+        return writer.toOwnedSlice();
     }
 
     // --- Internal: Pairing ---
 
     fn handlePairingFlow(self: *Client) !void {
         log.info("Client", "Waiting for pairing...", .{});
+        var pair_sign_sent = false;
         var count: usize = 0;
         while (count < 30) : (count += 1) {
             var node = try self.receiveNode();
@@ -414,39 +356,37 @@ pub const Client = struct {
                 return error.ServerRejected;
             }
 
-            // Log stream:error details
             if (std.mem.eql(u8, node.tag, "stream:error")) {
+                // After pair-device-sign, any stream:error means "reconnect now"
+                // (515 is expected, but ping timeout also triggers reconnect)
+                if (pair_sign_sent) return;
                 for (node.attributes.items) |attr| {
                     log.warn("Client/Pair", "  stream:error {s}={s}", .{ attr.key, attr.value });
                 }
-                // 515 = expected reconnect after pair-device-sign completed
-                if (node.getAttribute("code")) |code| {
-                    if (std.mem.eql(u8, code, "515")) return;
-                }
-                // Other codes = server kicked us (QR timeout, etc.)
                 return error.StreamError;
             }
 
             if (std.mem.eql(u8, node.tag, "iq")) {
+                var handled = false;
                 if (node.getContentNodes()) |children| {
                     for (children) |*child| {
                         if (std.mem.eql(u8, child.tag, "pair-device")) {
-                            // Emit QR code event
+                            handled = true;
                             self.emitQrCodes(child);
-                            // The real server accepts the IQ result only when it matches
-                            // the Rust wire format, including attribute order: to, id, type.
                             self.sendIqResult(
                                 node.getAttribute("id"),
                                 node.getAttribute("from") orelse "s.whatsapp.net",
                             );
                         } else if (std.mem.eql(u8, child.tag, "pair-success")) {
                             try self.handlePairSuccess(&node);
-                            return;
+                            pair_sign_sent = true;
                         }
                     }
                 }
+                if (!handled) self.processNode(&node);
+                continue;
             }
-            if (std.mem.eql(u8, node.tag, "stream:error")) return;
+            self.processNode(&node);
         }
         return error.PairingTimeout;
     }
@@ -516,14 +456,6 @@ pub const Client = struct {
         );
         defer response.deinit();
         try self.sendNode(&response);
-
-        // Read until stream:error 515
-        var i: usize = 0;
-        while (i < 5) : (i += 1) {
-            var next = self.receiveNode() catch return;
-            defer next.deinit();
-            if (std.mem.eql(u8, next.tag, "stream:error")) return;
-        }
     }
 
     // --- Internal: Login ---
@@ -587,11 +519,22 @@ pub const Client = struct {
         }
 
         if (std.mem.eql(u8, tag, "message")) {
+            const decrypted = self.decryptMessageNode(node);
+            defer if (decrypted) |d| self.allocator.free(d);
+
+            var body: ?[]const u8 = null;
+            if (decrypted) |d| body = messaging.decodeTextMessage(d);
+
+            // Store for waitForText
+            if (self._last_msg_text) |old| self.allocator.free(old);
+            self._last_msg_text = if (body) |b| self.allocator.dupe(u8, b) catch null else null;
+
             self.emit(.{ .message = .{
                 .from = node.getAttribute("from") orelse "",
                 .chat = node.getAttribute("from") orelse "",
                 .id = node.getAttribute("id") orelse "",
                 .node = node,
+                .body = body,
             } });
         }
 
@@ -600,6 +543,197 @@ pub const Client = struct {
             defer ack.deinit();
             self.sendNode(&ack) catch {};
         }
+    }
+
+    // --- Internal: Message Send ---
+
+    fn sendEncrypted(self: *Client, to_jid: []const u8, text: []const u8, prekey_params: ?PreKeyMsgParams) !void {
+        const session = self.findSession(to_jid) orelse return error.NoSession;
+        const plaintext = try messaging.encodeTextMessage(self.allocator, text);
+        defer self.allocator.free(plaintext);
+        var encrypted_msg = try session.encrypt(self.allocator, plaintext, self.io);
+        defer encrypted_msg.deinit(self.allocator);
+        const signal_msg_bytes = try signal.message.serializeSignalMessage(self.allocator, &encrypted_msg);
+        defer self.allocator.free(signal_msg_bytes);
+
+        var ciphertext: []u8 = undefined;
+        if (prekey_params) |pk| {
+            ciphertext = try signal.message.serializePreKeySignalMessage(
+                self.allocator,
+                pk.registration_id,
+                pk.prekey_id,
+                pk.signed_prekey_id,
+                pk.base_key,
+                self.identity.key_pair.public,
+                signal_msg_bytes,
+            );
+        } else {
+            ciphertext = try self.allocator.dupe(u8, signal_msg_bytes);
+        }
+        defer self.allocator.free(ciphertext);
+
+        const msg_id_arr = messaging.generateMessageId(self.io);
+        var msg_node = try messaging.buildMessageNode(self.allocator, to_jid, &msg_id_arr, ciphertext, prekey_params != null);
+        defer msg_node.deinit();
+        try self.sendNode(&msg_node);
+    }
+
+    fn fetchPrekeys(self: *Client, jid: []const u8) !prekey_mod.PreKeyBundle {
+        const iq_id = try self.nextIqId();
+        defer self.allocator.free(iq_id);
+        var fetch_iq = try messaging.buildFetchPrekeysIq(self.allocator, iq_id, &.{jid});
+        defer fetch_iq.deinit();
+        try self.sendNode(&fetch_iq);
+
+        var attempts: usize = 0;
+        while (attempts < 20) : (attempts += 1) {
+            var node = try self.receiveNodeTimeout(5_000);
+            if (std.mem.eql(u8, node.tag, "iq")) {
+                const node_id = node.getAttribute("id") orelse "";
+                if (std.mem.eql(u8, node_id, iq_id)) {
+                    defer node.deinit();
+                    return parsePreKeyResponse(&node);
+                }
+            }
+            self.processNode(&node);
+            node.deinit();
+        }
+        return error.PreKeyFetchTimeout;
+    }
+
+    fn createSession(self: *Client, jid: []const u8, bundle: prekey_mod.PreKeyBundle) !PreKeyMsgParams {
+        const base_key = signal.KeyPair.generate(self.io);
+        const x3dh_result = try signal.ratchet.x3dh(
+            self.identity,
+            base_key,
+            bundle.identity_key,
+            bundle.signed_prekey_public,
+            bundle.prekey_public,
+        );
+        const session = try signal.Session.initAsInitiator(
+            self.allocator,
+            x3dh_result,
+            self.identity.key_pair.public,
+            bundle.identity_key,
+            base_key,
+            bundle.signed_prekey_public,
+            self.registration_id,
+            bundle.registration_id,
+        );
+        try self.storeSession(jid, session);
+        return .{
+            .registration_id = self.registration_id,
+            .prekey_id = bundle.prekey_id,
+            .signed_prekey_id = bundle.signed_prekey_id,
+            .base_key = base_key.public,
+        };
+    }
+
+    // --- Internal: Signal Decrypt ---
+
+    fn decryptPreKeyMessage(self: *Client, from_jid: []const u8, ciphertext: []const u8) ![]u8 {
+        const pkmsg = try signal.message.parsePreKeySignalMessage(ciphertext);
+
+        // Look up our one-time prekey by ID
+        var our_otpk: ?signal.KeyPair = null;
+        if (pkmsg.prekey_id) |pk_id| {
+            for (&self.prekeys) |*pk| {
+                if (pk.id == pk_id) {
+                    our_otpk = pk.key_pair;
+                    break;
+                }
+            }
+        }
+
+        if (pkmsg.signed_prekey_id != self.signed_prekey.id) return error.SignedPreKeyMismatch;
+
+        // X3DH as responder
+        const x3dh_result = try signal.ratchet.x3dhResponder(
+            self.identity,
+            self.signed_prekey.key_pair,
+            our_otpk,
+            pkmsg.identity_key,
+            pkmsg.base_key,
+        );
+
+        // Create responder session
+        var session = signal.Session.initAsResponder(
+            self.allocator,
+            x3dh_result,
+            self.identity.key_pair.public,
+            pkmsg.identity_key,
+            self.signed_prekey.key_pair,
+            self.registration_id,
+            pkmsg.registration_id,
+        );
+
+        // Decrypt inner SignalMessage
+        const plaintext = try self.decryptSignalMessage(&session, pkmsg.signal_message, pkmsg.identity_key);
+
+        // Store session for future messages from this sender
+        self.storeSession(from_jid, session) catch {};
+
+        return plaintext;
+    }
+
+    fn decryptSessionMessage(self: *Client, from_jid: []const u8, ciphertext: []const u8) ![]u8 {
+        const session = self.findSession(from_jid) orelse return error.NoSession;
+        return self.decryptSignalMessage(session, ciphertext, session.remote_identity_public);
+    }
+
+    fn decryptSignalMessage(self: *Client, session: *signal.Session, data: []const u8, sender_identity: [32]u8) ![]u8 {
+        const parsed = try signal.message.parseSignalMessage(data);
+
+        // Build EncryptedMessage for session.decrypt (mac_key unused in decrypt path)
+        var enc_msg = signal.session.EncryptedMessage{
+            .ratchet_key = parsed.ratchet_key,
+            .counter = parsed.counter,
+            .previous_counter = parsed.previous_counter,
+            .ciphertext = @constCast(parsed.ciphertext),
+            .sender_identity = sender_identity,
+            .receiver_identity = self.identity.key_pair.public,
+            .mac_key = undefined,
+        };
+
+        return session.decrypt(self.allocator, &enc_msg, self.io);
+    }
+
+    fn findSession(self: *Client, jid: []const u8) ?*signal.Session {
+        for (self.sessions.items) |*entry| {
+            if (std.mem.eql(u8, entry.jid, jid)) return &entry.session;
+        }
+        return null;
+    }
+
+    fn storeSession(self: *Client, jid: []const u8, session: signal.Session) !void {
+        for (self.sessions.items) |*entry| {
+            if (std.mem.eql(u8, entry.jid, jid)) {
+                entry.session.deinit();
+                entry.session = session;
+                return;
+            }
+        }
+        const jid_owned = try self.allocator.dupe(u8, jid);
+        try self.sessions.append(self.allocator, .{ .jid = jid_owned, .session = session });
+    }
+
+    // --- Internal: Prekey Parsing ---
+
+    fn parsePreKeyResponse(node: *const binary.Node) !prekey_mod.PreKeyBundle {
+        const children = node.getContentNodes() orelse return error.EmptyPreKeyResponse;
+        for (children) |*child| {
+            if (std.mem.eql(u8, child.tag, "list")) {
+                if (child.getContentNodes()) |list_children| {
+                    for (list_children) |*user_child| {
+                        if (std.mem.eql(u8, user_child.tag, "user"))
+                            return prekey_mod.parsePreKeyBundle(user_child);
+                    }
+                }
+            } else if (std.mem.eql(u8, child.tag, "user")) {
+                return prekey_mod.parsePreKeyBundle(child);
+            }
+        }
+        return error.NoPreKeyBundle;
     }
 
     // --- Internal: Helpers ---
@@ -621,6 +755,35 @@ pub const Client = struct {
         var r = buildIqResultNode(self.allocator, id, to) catch return;
         defer r.deinit();
         self.sendNode(&r) catch {};
+    }
+
+    fn makeBasePayload(self: *const Client) whatsapp.ClientPayload {
+        return .{
+            .userAgent = self.makeUserAgent(),
+            .webInfo = .{ .webSubPlatform = .WEB_BROWSER },
+            .connectType = .WIFI_UNKNOWN,
+            .connectReason = .USER_ACTIVATED,
+        };
+    }
+
+    fn makeUserAgent(self: *const Client) whatsapp.ClientPayload.UserAgent {
+        return .{
+            .platform = .WEB,
+            .releaseChannel = .RELEASE,
+            .appVersion = .{
+                .primary = self.app_version.primary,
+                .secondary = self.app_version.secondary,
+                .tertiary = self.app_version.tertiary,
+            },
+            .mcc = "000",
+            .mnc = "000",
+            .osVersion = "0.1.0",
+            .manufacturer = "",
+            .device = "Desktop",
+            .osBuildNumber = "0.1.0",
+            .localeLanguageIso6391 = "en",
+            .localeCountryIso31661Alpha2 = "en",
+        };
     }
 
     pub fn nextIqId(self: *Client) ![]u8 {
@@ -920,4 +1083,31 @@ test "iq result encoding matches Rust wire order" {
         0x10, 0x79, 0x74,
         0x73, 0x04, 0x14,
     }, writer.getWritten());
+}
+
+test "pairing payload keeps rust-compatible device props" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client = try Client.init(allocator, io, .{});
+    defer client.deinit();
+    client.app_version = .{
+        .primary = 2,
+        .secondary = 3000,
+        .tertiary = 1037005288,
+    };
+
+    const payload_bytes = try client.buildPairingPayload();
+    defer allocator.free(payload_bytes);
+
+    var payload_reader: std.Io.Reader = .fixed(payload_bytes);
+    var payload = try whatsapp.ClientPayload.decode(&payload_reader, allocator);
+    defer payload.deinit(allocator);
+
+    const encoded_device_props = payload.devicePairingData.?.deviceProps orelse return error.TestUnexpectedResult;
+    var device_props_reader: std.Io.Reader = .fixed(encoded_device_props);
+    var device_props = try whatsapp.DeviceProps.decode(&device_props_reader, allocator);
+    defer device_props.deinit(allocator);
+
+    try std.testing.expectEqualStrings("rust", device_props.os orelse "");
 }

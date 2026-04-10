@@ -107,5 +107,5 @@ fn encodeProtobuf(allocator: std.mem.Allocator, msg: anytype) ![]u8 {
     var writer = std.Io.Writer.Allocating.init(allocator);
     defer writer.deinit();
     try msg.encode(&writer.writer, allocator);
-    return allocator.dupe(u8, writer.written());
+    return writer.toOwnedSlice();
 }

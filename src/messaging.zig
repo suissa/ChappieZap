@@ -2,6 +2,10 @@ const std = @import("std");
 const binary = @import("binary");
 const signal = @import("signal");
 const prekey_mod = @import("prekey");
+// Protobuf field numbers from wa.Message:
+// field 1  = conversation (string)
+// field 6  = extendedTextMessage (submessage) → field 1 = text
+// field 31 = deviceSentMessage (submessage)   → field 2 = message (Message)
 
 /// Build a prekey fetch IQ: <iq xmlns="encrypt" type="get"><key><user jid="..."/></key></iq>
 pub fn buildFetchPrekeysIq(allocator: std.mem.Allocator, iq_id: []const u8, jids: []const []const u8) !binary.Node {
@@ -98,55 +102,67 @@ pub fn encodeTextMessage(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     return buf.toOwnedSlice(allocator);
 }
 
-/// Decode a text message from protobuf (extract conversation field 1)
+/// Decode protobuf Message and extract text content.
+/// Handles DeviceSentMessage unwrapping (companion device messages)
+/// and ExtendedTextMessage. Matches Rust's text_content() + unwrap_device_sent().
 pub fn decodeTextMessage(data: []const u8) ?[]const u8 {
+    // Unwrap DeviceSentMessage (field 31) → inner Message (field 2)
+    if (pbFindField(data, 31)) |dsm_bytes| {
+        if (pbFindField(dsm_bytes, 2)) |inner_msg| {
+            return extractText(inner_msg);
+        }
+    }
+    return extractText(data);
+}
+
+fn extractText(msg_data: []const u8) ?[]const u8 {
+    // Message.conversation (field 1)
+    if (pbFindField(msg_data, 1)) |text| {
+        if (text.len > 0) return text;
+    }
+    // Message.extendedTextMessage (field 6) → text (field 1)
+    if (pbFindField(msg_data, 6)) |ext| {
+        if (pbFindField(ext, 1)) |text| return text;
+    }
+    return null;
+}
+
+/// Find a length-delimited protobuf field by number. Returns the field's raw bytes.
+fn pbFindField(data: []const u8, target: u32) ?[]const u8 {
     var pos: usize = 0;
     while (pos < data.len) {
-        if (pos >= data.len) break;
-        const tag_byte = data[pos];
-        pos += 1;
-        const field_num = tag_byte >> 3;
-        const wire_type = tag_byte & 0x07;
-
-        if (field_num == 1 and wire_type == 2) {
-            // Length-delimited: read varint length, then bytes
-            var length: usize = 0;
-            var shift: u5 = 0;
-            while (pos < data.len) {
-                const byte = data[pos];
-                pos += 1;
-                length |= @as(usize, byte & 0x7F) << shift;
-                if (byte & 0x80 == 0) break;
-                shift += 7;
-            }
-            if (pos + length <= data.len) {
-                return data[pos .. pos + length];
-            }
-            return null;
+        const tag = pbVarint(data, &pos) orelse return null;
+        const field = @as(u32, @intCast(tag >> 3));
+        const wtype = @as(u3, @intCast(tag & 7));
+        if (field == target and wtype == 2) {
+            const len: usize = @intCast(pbVarint(data, &pos) orelse return null);
+            if (pos + len > data.len) return null;
+            return data[pos .. pos + len];
         }
-
-        // Skip other fields
-        switch (wire_type) {
-            0 => { // varint
-                while (pos < data.len and data[pos] & 0x80 != 0) pos += 1;
-                if (pos < data.len) pos += 1;
-            },
-            1 => pos += 8,
+        // Skip
+        switch (wtype) {
+            0 => _ = pbVarint(data, &pos) orelse return null,
+            1 => pos = if (pos + 8 <= data.len) pos + 8 else return null,
             2 => {
-                var length: usize = 0;
-                var shift: u5 = 0;
-                while (pos < data.len) {
-                    const byte = data[pos];
-                    pos += 1;
-                    length |= @as(usize, byte & 0x7F) << shift;
-                    if (byte & 0x80 == 0) break;
-                    shift += 7;
-                }
-                pos += length;
+                const len: usize = @intCast(pbVarint(data, &pos) orelse return null);
+                pos = if (pos + len <= data.len) pos + len else return null;
             },
-            5 => pos += 4,
-            else => break,
+            5 => pos = if (pos + 4 <= data.len) pos + 4 else return null,
+            else => return null,
         }
+    }
+    return null;
+}
+
+fn pbVarint(data: []const u8, pos: *usize) ?u64 {
+    var result: u64 = 0;
+    var shift: u6 = 0;
+    while (pos.* < data.len) {
+        const byte = data[pos.*];
+        pos.* += 1;
+        result |= @as(u64, byte & 0x7F) << shift;
+        if (byte & 0x80 == 0) return result;
+        shift = std.math.add(u6, shift, 7) catch return null;
     }
     return null;
 }

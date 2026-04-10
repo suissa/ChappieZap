@@ -141,7 +141,8 @@ pub const NodeContent = union(enum) {
 
     /// Create nodes content
     pub fn initNodes(allocator: std.mem.Allocator) !NodeContent {
-        return NodeContent{ .Nodes = try std.ArrayList(Node).initCapacity(allocator, 4) };
+        _ = allocator;
+        return NodeContent{ .Nodes = .empty };
     }
 
     /// Deinitialize content
@@ -178,7 +179,7 @@ pub const Node = struct {
         return Node{
             .allocator = allocator,
             .tag = try allocator.dupe(u8, tag),
-            .attributes = try std.ArrayList(Attribute).initCapacity(allocator, 4),
+            .attributes = .empty,
             .content = null,
         };
     }
@@ -222,8 +223,8 @@ pub const Node = struct {
         }
 
         try self.content.?.Nodes.append(self.allocator, child.*);
-        // Clear the child's arrays to prevent double-free
-        child.attributes = try std.ArrayList(Attribute).initCapacity(child.allocator, 0);
+        // Clear the child's arrays to prevent double-free without allocating.
+        child.attributes = .empty;
         child.content = null;
         // Transfer ownership of tag to the copy
         child.tag = "";

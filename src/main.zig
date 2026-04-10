@@ -46,26 +46,26 @@ fn handleEvent(event: zigwhats.Event, ctx: *anyopaque) void {
         .message => |msg| {
             log.info("Main", "Message from {s}", .{msg.from});
 
-            var has_enc = false;
-            if (msg.node.getContentNodes()) |children| {
-                for (children) |*child| {
-                    if (std.mem.eql(u8, child.tag, "enc")) {
-                        has_enc = true;
-                        log.debug("Main", "  encrypted stanza type={s}", .{child.getAttribute("type") orelse "?"});
-                    }
-                }
-            }
-
-            // Reply to 🦎ping with pong
             if (msg.getBody()) |body| {
+                log.info("Main", "  body: {s}", .{body});
+                // Reply to 🦎ping with pong
                 if (std.mem.indexOf(u8, body, "\xf0\x9f\xa6\x8eping")) |_| {
                     log.info("Main", "Got 🦎ping! Sending pong...", .{});
-                    client.sendText(msg.from, "pong") catch |err| {
+                    client.sendMessage(msg.from, "pong") catch |err| {
                         log.err("Main", "Reply failed: {}", .{err});
                     };
                 }
-            } else if (has_enc) {
-                log.info("Main", "Message body unavailable: incoming Signal payload is not decrypted yet", .{});
+            } else {
+                // Check for undecrypted enc nodes
+                if (msg.node.getContentNodes()) |children| {
+                    for (children) |*child| {
+                        if (std.mem.eql(u8, child.tag, "enc")) {
+                            log.debug("Main", "  encrypted (undecrypted) type={s}", .{
+                                child.getAttribute("type") orelse "?",
+                            });
+                        }
+                    }
+                }
             }
         },
         .disconnected => log.warn("Main", "Disconnected", .{}),

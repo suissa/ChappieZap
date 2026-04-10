@@ -226,14 +226,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "client", .module = client_mod },
-                .{ .name = "noise", .module = noise_mod },
-                .{ .name = "xed25519", .module = xed25519_mod },
-                .{ .name = "whatsapp_proto", .module = wa_proto_mod },
-                .{ .name = "binary", .module = binary_mod },
-                .{ .name = "socket", .module = socket_mod },
-                .{ .name = "signal", .module = signal_mod },
-                .{ .name = "messaging", .module = messaging_mod },
-                .{ .name = "prekey", .module = prekey_mod },
             },
         }),
     });

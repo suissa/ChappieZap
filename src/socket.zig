@@ -36,6 +36,19 @@ pub const NoiseCipher = struct {
         return result;
     }
 
+    /// Encrypt plaintext into a reusable buffer. Output is ciphertext followed by tag.
+    pub fn encryptInto(self: *NoiseCipher, out: *std.ArrayList(u8), allocator: std.mem.Allocator, plaintext: []const u8) !void {
+        const iv = generateIv(self.counter);
+        out.clearRetainingCapacity();
+        const ciphertext = try out.addManyAsSlice(allocator, plaintext.len);
+
+        var tag: [Aes256Gcm.tag_length]u8 = undefined;
+        Aes256Gcm.encrypt(ciphertext, &tag, plaintext, &.{}, iv, self.key);
+        try out.appendSlice(allocator, &tag);
+
+        self.counter +%= 1;
+    }
+
     /// Decrypt ciphertext + tag, returns plaintext. Increments counter.
     pub fn decrypt(self: *NoiseCipher, allocator: std.mem.Allocator, ciphertext_with_tag: []const u8) ![]u8 {
         if (ciphertext_with_tag.len < Aes256Gcm.tag_length) return error.CiphertextTooShort;
@@ -64,6 +77,8 @@ pub const NoiseSocket = struct {
     frame_decoder: framing.FrameDecoder,
     allocator: std.mem.Allocator,
     ws_read_buf: []u8,
+    send_cipher_buf: std.ArrayList(u8),
+    send_frame_buf: std.ArrayList(u8),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -77,32 +92,33 @@ pub const NoiseSocket = struct {
             .frame_decoder = framing.FrameDecoder.init(allocator),
             .allocator = allocator,
             .ws_read_buf = ws_read_buf,
+            .send_cipher_buf = .empty,
+            .send_frame_buf = .empty,
         };
     }
 
     pub fn deinit(self: *NoiseSocket) void {
         self.frame_decoder.deinit();
+        self.send_cipher_buf.deinit(self.allocator);
+        self.send_frame_buf.deinit(self.allocator);
         self.allocator.free(self.ws_read_buf);
     }
 
     /// Send an encrypted frame over the WebSocket.
     pub fn send(self: *NoiseSocket, ws_client: *ws.WebSocketClient, plaintext: []const u8) !void {
-        const ciphertext = try self.write_cipher.encrypt(self.allocator, plaintext);
-        defer self.allocator.free(ciphertext);
-
-        const frame = try framing.encodeFrame(self.allocator, ciphertext, null);
-        defer self.allocator.free(frame);
+        try self.write_cipher.encryptInto(&self.send_cipher_buf, self.allocator, plaintext);
+        try framing.encodeFrameInto(&self.send_frame_buf, self.allocator, self.send_cipher_buf.items, null);
 
         if (log.enabled(.debug)) {
             const hex = try allocHexPreview(self.allocator, plaintext, 128);
             defer self.allocator.free(hex);
             log.debug("Transport", "--> Sending {d} bytes (plaintext {d} bytes): {s}", .{
-                frame.len,
+                self.send_frame_buf.items.len,
                 plaintext.len,
                 hex,
             });
         }
-        try ws_client.writeBinary(frame);
+        try ws_client.writeBinary(self.send_frame_buf.items);
     }
 
     /// Receive and decrypt the next frame with optional timeout (milliseconds).
@@ -119,14 +135,12 @@ pub const NoiseSocket = struct {
         defer ws_client.setReadTimeout(null); // Clear timeout after read
         while (true) {
             if (self.frame_decoder.decodeFrame()) |frame_data| {
-                const frame_copy = try self.allocator.dupe(u8, frame_data);
-                self.frame_decoder.consume(frame_data.len);
-
-                const plaintext = self.read_cipher.decrypt(self.allocator, frame_copy) catch |err| {
-                    self.allocator.free(frame_copy);
+                const frame_len = frame_data.len;
+                const plaintext = self.read_cipher.decrypt(self.allocator, frame_data) catch |err| {
+                    self.frame_decoder.consume(frame_len);
                     return err;
                 };
-                self.allocator.free(frame_copy);
+                self.frame_decoder.consume(frame_len);
                 return plaintext;
             }
 

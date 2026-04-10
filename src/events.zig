@@ -40,10 +40,12 @@ pub const Event = union(enum) {
         id: []const u8,
         /// The full message node (user can inspect children)
         node: *const binary.Node,
+        /// Decrypted text body (null if not decrypted or no text content)
+        body: ?[]const u8 = null,
 
-        /// Get text content from <enc> or direct body (if available)
+        /// Get text body: decrypted body if available, otherwise raw node content
         pub fn getBody(self: Message) ?[]const u8 {
-            // Look for direct text content in the node
+            if (self.body) |b| return b;
             return self.node.getContentBytes();
         }
     };

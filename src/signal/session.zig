@@ -217,30 +217,24 @@ pub const EncryptedMessage = struct {
 // --- AES-256-CBC ---
 
 fn aesCbcEncrypt(allocator: std.mem.Allocator, key: *const [32]u8, iv: *const [16]u8, plaintext: []const u8) ![]u8 {
-    // Pad to 16-byte boundary if needed
     const block_size = 16;
-    const padded_len = ((plaintext.len + block_size - 1) / block_size) * block_size;
-    if (padded_len == 0) return allocator.dupe(u8, &.{});
+    // PKCS7 padding: always add 1-16 bytes so result is a multiple of block_size
+    const pad: u8 = @intCast(block_size - (plaintext.len % block_size));
+    const padded_len = plaintext.len + pad;
 
     const result = try allocator.alloc(u8, padded_len);
     errdefer allocator.free(result);
 
     @memcpy(result[0..plaintext.len], plaintext);
-    // Zero-pad remainder (PKCS7 padding should already be in plaintext)
-    if (padded_len > plaintext.len) {
-        @memset(result[plaintext.len..], 0);
-    }
+    @memset(result[plaintext.len..], pad);
 
     const cipher = Aes256.initEnc(key.*);
     var prev_block: [16]u8 = iv.*;
 
     var i: usize = 0;
     while (i < padded_len) : (i += block_size) {
-        // XOR with previous ciphertext block (CBC)
         var block: [16]u8 = result[i..][0..16].*;
         for (0..16) |j| block[j] ^= prev_block[j];
-
-        // Encrypt
         var encrypted: [16]u8 = undefined;
         cipher.encrypt(&encrypted, &block);
         @memcpy(result[i..][0..16], &encrypted);
@@ -254,8 +248,7 @@ fn aesCbcDecrypt(allocator: std.mem.Allocator, key: *const [32]u8, iv: *const [1
     const block_size = 16;
     if (ciphertext.len == 0 or ciphertext.len % block_size != 0) return error.InvalidCiphertext;
 
-    const result = try allocator.alloc(u8, ciphertext.len);
-    errdefer allocator.free(result);
+    const buf = try allocator.alloc(u8, ciphertext.len);
 
     const cipher = Aes256.initDec(key.*);
     var prev_block: [16]u8 = iv.*;
@@ -267,9 +260,27 @@ fn aesCbcDecrypt(allocator: std.mem.Allocator, key: *const [32]u8, iv: *const [1
         cipher.decrypt(&decrypted, &ct_block);
         var plain_block: [16]u8 = decrypted;
         for (0..16) |j| plain_block[j] ^= prev_block[j];
-        @memcpy(result[i..][0..16], &plain_block);
+        @memcpy(buf[i..][0..16], &plain_block);
         prev_block = ct_block;
     }
 
+    // Remove PKCS7 padding
+    const pad = buf[ciphertext.len - 1];
+    if (pad == 0 or pad > block_size) {
+        allocator.free(buf);
+        return error.InvalidPadding;
+    }
+    for (buf[ciphertext.len - pad ..]) |b| {
+        if (b != pad) {
+            allocator.free(buf);
+            return error.InvalidPadding;
+        }
+    }
+    const unpadded_len = ciphertext.len - pad;
+    const result = allocator.dupe(u8, buf[0..unpadded_len]) catch |e| {
+        allocator.free(buf);
+        return e;
+    };
+    allocator.free(buf);
     return result;
 }

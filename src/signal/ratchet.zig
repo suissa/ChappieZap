@@ -126,3 +126,52 @@ pub fn x3dh(
         .chain_key = .{ .key = okm[32..64].*, .index = 0 },
     };
 }
+
+/// X3DH key agreement as responder (Bob): create initial root key + chain key.
+/// The DH computations mirror x3dh() but with swapped roles.
+pub fn x3dhResponder(
+    our_identity: keys.IdentityKeyPair,
+    our_signed_prekey: keys.KeyPair,
+    our_one_time_prekey: ?keys.KeyPair,
+    their_identity_public: [32]u8,
+    their_base_key: [32]u8,
+) !X3DHResult {
+    var secret_buf: [32 * 5]u8 = undefined;
+    var secret_len: usize = 0;
+
+    // 32 discontinuity bytes (0xFF)
+    @memset(secret_buf[0..32], 0xFF);
+    secret_len += 32;
+
+    // DH1: our_signed_prekey × their_identity (matches initiator DH1)
+    const dh1 = try our_signed_prekey.dh(their_identity_public);
+    @memcpy(secret_buf[secret_len..][0..32], &dh1);
+    secret_len += 32;
+
+    // DH2: our_identity × their_base_key (matches initiator DH2)
+    const dh2 = try our_identity.key_pair.dh(their_base_key);
+    @memcpy(secret_buf[secret_len..][0..32], &dh2);
+    secret_len += 32;
+
+    // DH3: our_signed_prekey × their_base_key (matches initiator DH3)
+    const dh3 = try our_signed_prekey.dh(their_base_key);
+    @memcpy(secret_buf[secret_len..][0..32], &dh3);
+    secret_len += 32;
+
+    // DH4: our_one_time_prekey × their_base_key (optional)
+    if (our_one_time_prekey) |otpk| {
+        const dh4 = try otpk.dh(their_base_key);
+        @memcpy(secret_buf[secret_len..][0..32], &dh4);
+        secret_len += 32;
+    }
+
+    // Same HKDF derivation as initiator
+    const prk = HkdfSha256.extract(&[_]u8{0} ** 32, secret_buf[0..secret_len]);
+    var okm: [64]u8 = undefined;
+    HkdfSha256.expand(&okm, "WhisperText", prk);
+
+    return .{
+        .root_key = .{ .key = okm[0..32].* },
+        .chain_key = .{ .key = okm[32..64].*, .index = 0 },
+    };
+}

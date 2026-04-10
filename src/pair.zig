@@ -6,10 +6,27 @@ const whatsapp = @import("whatsapp_proto");
 const ADV_PREFIX_DEVICE_SIGNATURE_GENERATE = [_]u8{ 6, 1 };
 const ADV_HOSTED_PREFIX_DEVICE_SIGNATURE_VERIFICATION = [_]u8{ 6, 6 };
 
+/// Device props must stay wire-compatible with the Rust reference.
+/// The `os = "rust"` value is intentionally preserved because the real WA
+/// server is sensitive to this exact payload shape during pairing.
+pub fn makePairingDeviceProps() whatsapp.DeviceProps {
+    return .{
+        .os = "rust",
+        .version = .{ .primary = 0, .secondary = 1, .tertiary = 0 },
+        .platformType = .UNKNOWN,
+        .requireFullSync = true,
+        .historySyncConfig = .{
+            .fullSyncDaysLimit = 30,
+            .inlineInitialPayloadInE2EeMsg = true,
+            .storageQuotaMb = 10240,
+            .supportMessageAssociation = true,
+        },
+    };
+}
+
 /// Build a DevicePairingRegistrationData for the initial ClientPayload.
 /// This tells the server we're a new device that needs pairing.
 pub fn buildPairingData(
-    allocator: std.mem.Allocator,
     identity: signal.IdentityKeyPair,
     signed_prekey: signal.SignedPreKey,
     registration_id: u32,
@@ -53,7 +70,6 @@ pub fn buildPairingData(
         .e_skey_val = e_skey_val,
         .e_skey_sig = e_skey_sig,
         .build_hash = build_hash,
-        .allocator = allocator,
     };
 }
 
@@ -65,7 +81,6 @@ pub const PairingData = struct {
     e_skey_val: [32]u8,
     e_skey_sig: [64]u8,
     build_hash: [16]u8,
-    allocator: std.mem.Allocator,
 };
 
 pub const PairCryptoResult = struct {
@@ -123,7 +138,7 @@ pub fn doPairCrypto(
     try signed_identity.encode(&writer.writer, allocator);
 
     return .{
-        .self_signed_identity_bytes = try allocator.dupe(u8, writer.written()),
+        .self_signed_identity_bytes = try writer.toOwnedSlice(),
         .key_index = identity_details.keyIndex orelse 0,
     };
 }
@@ -242,24 +257,13 @@ test "pairing payload matches rust reference bytes for fixed keys" {
         .signature = signature,
     };
 
-    const pd = try buildPairingData(allocator, identity, signed_prekey, 958248714, .{
+    const pd = try buildPairingData(identity, signed_prekey, 958248714, .{
         .primary = 2,
         .secondary = 3000,
         .tertiary = 1037005288,
     });
 
-    const device_props = whatsapp.DeviceProps{
-        .os = "rust",
-        .version = .{ .primary = 0, .secondary = 1, .tertiary = 0 },
-        .platformType = .UNKNOWN,
-        .requireFullSync = true,
-        .historySyncConfig = .{
-            .fullSyncDaysLimit = 30,
-            .inlineInitialPayloadInE2EeMsg = true,
-            .storageQuotaMb = 10240,
-            .supportMessageAssociation = true,
-        },
-    };
+    const device_props = makePairingDeviceProps();
     var dp_writer = std.Io.Writer.Allocating.init(allocator);
     defer dp_writer.deinit();
     try device_props.encode(&dp_writer.writer, allocator);
