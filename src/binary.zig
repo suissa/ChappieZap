@@ -80,14 +80,14 @@ pub fn getDoubleByteToken(str: []const u8) ?struct { u8, u8 } {
 
 /// Get string for single byte token - O(1) array lookup
 pub fn getStringForSingleByteToken(token: u8) ?[]const u8 {
-    if (token >= token_data.single_reverse.len) return null;
-    return token_data.single_reverse[token];
+    if (token >= tokens_gen.single_byte_tokens.len) return null;
+    return tokens_gen.single_byte_tokens[token];
 }
 
 /// Get string for double byte token - O(1) array lookup
 pub fn getStringForDoubleByteToken(page: u8, token: u8) ?[]const u8 {
-    if (page >= token_data.double_reverse.len) return null;
-    return token_data.double_reverse[page][token];
+    if (page >= tokens_gen.double_byte_tokens.len) return null;
+    return tokens_gen.double_byte_tokens[page][token];
 }
 
 /// Write a string using token compression when possible
@@ -248,6 +248,16 @@ pub const Node = struct {
         }
         return null;
     }
+
+    /// Get an attribute value by key (returns null if not found)
+    pub fn getAttribute(self: Node, key: []const u8) ?[]const u8 {
+        for (self.attributes.items) |attr| {
+            if (std.mem.eql(u8, attr.key, key)) {
+                return attr.value;
+            }
+        }
+        return null;
+    }
 };
 /// Returns the number of bytes written
 pub fn encodeNode(node: *const Node, writer: *BinaryWriter) BinaryError!usize {
@@ -289,9 +299,29 @@ pub fn encodeNode(node: *const Node, writer: *BinaryWriter) BinaryError!usize {
     if (node.content) |content| {
         switch (content) {
             .Bytes => |bytes| {
-                try writer.writeByte(BINARY_8);
-                const content_bytes = try encodeBytes(bytes, writer);
-                total_bytes += 1 + content_bytes;
+                // Encode bytes using the same format as writeString:
+                // BINARY_8 + 1-byte len, BINARY_20 + 3-byte len, or BINARY_32 + 4-byte len
+                if (bytes.len < 256) {
+                    try writer.writeByte(BINARY_8);
+                    try writer.writeByte(@intCast(bytes.len));
+                    try writer.writeBytes(bytes);
+                    total_bytes += 2 + bytes.len;
+                } else if (bytes.len < (1 << 20)) {
+                    try writer.writeByte(BINARY_20);
+                    try writer.writeByte(@intCast((bytes.len >> 16) & 0xFF));
+                    try writer.writeByte(@intCast((bytes.len >> 8) & 0xFF));
+                    try writer.writeByte(@intCast(bytes.len & 0xFF));
+                    try writer.writeBytes(bytes);
+                    total_bytes += 4 + bytes.len;
+                } else {
+                    try writer.writeByte(BINARY_32);
+                    try writer.writeByte(@intCast(bytes.len >> 24));
+                    try writer.writeByte(@intCast((bytes.len >> 16) & 0xFF));
+                    try writer.writeByte(@intCast((bytes.len >> 8) & 0xFF));
+                    try writer.writeByte(@intCast(bytes.len & 0xFF));
+                    try writer.writeBytes(bytes);
+                    total_bytes += 5 + bytes.len;
+                }
             },
             .Nodes => |nodes| {
                 const nodes_bytes = try encodeNodeList(nodes.items, writer);
@@ -326,6 +356,7 @@ pub fn decodeNode(reader: *BinaryReader, allocator: std.mem.Allocator) (BinaryEr
     defer allocator.free(node_tag);
 
     var node = try Node.init(allocator, node_tag);
+    errdefer node.deinit();
 
     // Calculate expected items: list_size = 1 (tag) + 2 * attr_count + content_flag
     const attr_count = (list_size - 1) / 2;
@@ -344,21 +375,38 @@ pub fn decodeNode(reader: *BinaryReader, allocator: std.mem.Allocator) (BinaryEr
         try node.attributes.append(allocator, attr);
     }
 
-    // Read content if present
+    // Read content if present — matches Rust read_content_from_tag()
     if (has_content) {
         const content_tag = try reader.readByte();
-        if (content_tag == LIST_EMPTY) {
-            // No content
-            node.content = null;
-        } else if (content_tag >= BINARY_8 and content_tag <= BINARY_32) {
-            // Bytes content
-            const bytes = try decodeBytes(reader, allocator);
-            node.content = .{ .Bytes = bytes };
-        } else {
-            // Nodes content - unread the tag and decode as node list
-            reader.pos -= 1;
-            const nodes = try decodeNodeList(reader, allocator);
-            node.content = .{ .Nodes = nodes };
+        switch (content_tag) {
+            LIST_EMPTY => {
+                node.content = null;
+            },
+            LIST_8, LIST_16 => {
+                // Node list content — unread tag so decodeNodeList can read the list header
+                reader.pos -= 1;
+                const nodes = try decodeNodeList(reader, allocator);
+                node.content = .{ .Nodes = nodes };
+            },
+            BINARY_8 => {
+                const len = try reader.readByte();
+                const bytes = try reader.readBytes(len);
+                node.content = .{ .Bytes = try allocator.dupe(u8, bytes) };
+            },
+            BINARY_20 => {
+                const bytes = try decodeBytes20(reader, allocator);
+                node.content = .{ .Bytes = bytes };
+            },
+            BINARY_32 => {
+                const bytes = try decodeBytes32(reader, allocator);
+                node.content = .{ .Bytes = bytes };
+            },
+            else => {
+                // String content — unread the tag and decode as string
+                reader.pos -= 1;
+                const str = try decodeString(reader, allocator);
+                node.content = .{ .Bytes = str };
+            },
         }
     } else {
         node.content = null;
@@ -378,7 +426,7 @@ pub const JID = struct {
 
     // Server type constants
     pub const DEFAULT_USER_SERVER = "s.whatsapp.net";
-    pub const HIDDEN_USER_SERVER = "hid";
+    pub const HIDDEN_USER_SERVER = "lid";
     pub const HOSTED_SERVER = "hosted";
     pub const INTEROP_SERVER = "interop";
     pub const MESSENGER_SERVER = "messenger";
@@ -454,19 +502,20 @@ pub const JID = struct {
 
     /// Convert JID back to string format
     pub fn toString(self: JID, allocator: std.mem.Allocator) ![]u8 {
-        if (self.agent == 0 and self.device == 0 and self.integrator == 0) {
+        if (self.device == 0 and self.integrator == 0) {
             // Simple user@server format
             if (self.user.len > 0) {
                 return std.fmt.allocPrint(allocator, "{s}@{s}", .{ self.user, self.server });
             } else {
-                return std.fmt.allocPrint(allocator, "@{s}", .{self.server});
+                // Server-only JID (no user part) — just the server name
+                return allocator.dupe(u8, self.server);
             }
         } else if (self.integrator > 0) {
-            // agent.device:integrator@server format
-            return std.fmt.allocPrint(allocator, "{d}.{d}:{d}@{s}", .{ self.agent, self.device, self.integrator, self.server });
+            // user:device:integrator@server format
+            return std.fmt.allocPrint(allocator, "{s}:{d}:{d}@{s}", .{ self.user, self.device, self.integrator, self.server });
         } else {
-            // agent.device@server format
-            return std.fmt.allocPrint(allocator, "{d}.{d}@{s}", .{ self.agent, self.device, self.server });
+            // user:device@server format (WhatsApp uses : as device separator)
+            return std.fmt.allocPrint(allocator, "{s}:{d}@{s}", .{ self.user, self.device, self.server });
         }
     }
 
@@ -560,16 +609,15 @@ pub fn encodeJidStruct(jid: *const JID, writer: *BinaryWriter) BinaryError!usize
             const server_bytes = try encodeString(jid.server, writer);
             total_bytes += server_bytes;
         } else {
-            // AD_JID format: agent, device, user, server
-            try writer.writeByte(247); // AD_JID
+            // AD_JID format: agent (u8), device (u8), user
+            try writer.writeByte(AD_JID);
             total_bytes += 1;
 
             try writer.writeByte(jid.agent);
             total_bytes += 1;
 
-            try writer.writeByte(@as(u8, @intCast(jid.device >> 8)));
-            try writer.writeByte(@as(u8, @intCast(jid.device & 0xFF)));
-            total_bytes += 2;
+            try writer.writeByte(@as(u8, @intCast(jid.device)));
+            total_bytes += 1;
 
             // Encode user
             const user_bytes = try encodeString(jid.user, writer);
@@ -625,13 +673,10 @@ fn decodeJidPair(reader: *BinaryReader, allocator: std.mem.Allocator) (BinaryErr
     };
 }
 
-/// Decode AD_JID format: agent, device, user
+/// Decode AD_JID format: agent (u8), device (u8), user (string)
 fn decodeAdJid(reader: *BinaryReader, allocator: std.mem.Allocator) (BinaryError || std.mem.Allocator.Error)!JID {
     const agent = try reader.readByte();
-
-    const device_high = try reader.readByte();
-    const device_low = try reader.readByte();
-    const device = (@as(u16, device_high) << 8) | @as(u16, device_low);
+    const device: u16 = try reader.readByte(); // Single byte, cast to u16
 
     const user = try decodeString(reader, allocator);
     errdefer allocator.free(user);
@@ -639,7 +684,12 @@ fn decodeAdJid(reader: *BinaryReader, allocator: std.mem.Allocator) (BinaryError
     const server = switch (agent) {
         0 => JID.DEFAULT_USER_SERVER,
         1 => JID.HIDDEN_USER_SERVER,
-        else => JID.HOSTED_SERVER,
+        128 => JID.HOSTED_SERVER,
+        129 => "hosted.lid",
+        else => if ((agent & 128) != 0 and (agent & 1) == 0)
+            JID.HOSTED_SERVER
+        else
+            return BinaryError.InvalidFormat,
     };
 
     return JID{
@@ -753,6 +803,10 @@ pub fn decodeNodeList(reader: *BinaryReader, allocator: std.mem.Allocator) (Bina
     };
 
     var nodes = try std.ArrayList(Node).initCapacity(allocator, count);
+    errdefer {
+        for (nodes.items) |*n| n.deinit();
+        nodes.deinit(allocator);
+    }
 
     // Read each node
     var i: usize = 0;
@@ -980,7 +1034,11 @@ pub fn decodeString(reader: *BinaryReader, allocator: std.mem.Allocator) (Binary
             defer allocator.free(user);
             const server = try decodeString(reader, allocator);
             defer allocator.free(server);
-            return std.fmt.allocPrint(allocator, "{s}@{s}", .{ user, server });
+            if (user.len > 0) {
+                return std.fmt.allocPrint(allocator, "{s}@{s}", .{ user, server });
+            } else {
+                return allocator.dupe(u8, server);
+            }
         },
         AD_JID => {
             var jid = try decodeAdJid(reader, allocator);
@@ -1711,6 +1769,79 @@ test "JID parsing and operations" {
         defer allocator.free(jid_str);
         try std.testing.expectEqualStrings(test_case.input, jid_str);
     }
+}
+
+test "JID_PAIR server-only JID (empty user)" {
+    const allocator = std.testing.allocator;
+    // Simulate what the binary decoder does for a JID_PAIR with empty user:
+    // This is how "s.whatsapp.net" is encoded when sent as a JID attribute value
+    var buf: [64]u8 = undefined;
+    var writer = BinaryWriter.init(&buf);
+
+    // Write JID_PAIR: LIST_EMPTY (empty user) + token for "s.whatsapp.net"
+    try writer.writeByte(JID_PAIR);
+    try writer.writeByte(LIST_EMPTY); // empty user
+    // "s.whatsapp.net" is single byte token 3
+    try writer.writeByte(getSingleByteToken("s.whatsapp.net") orelse unreachable);
+
+    // Decode
+    var reader = BinaryReader.init(writer.getWritten());
+    const decoded = try decodeString(&reader, allocator);
+    defer allocator.free(decoded);
+
+    // Should be "s.whatsapp.net" NOT "@s.whatsapp.net"
+    try std.testing.expectEqualStrings("s.whatsapp.net", decoded);
+}
+
+test "JID toString server-only" {
+    const allocator = std.testing.allocator;
+
+    // Server-only JID (empty user, device 0)
+    const jid = JID{
+        .user = "",
+        .server = "s.whatsapp.net",
+        .agent = 0,
+        .device = 0,
+        .integrator = 0,
+        .allocator = allocator,
+    };
+    const str = try jid.toString(allocator);
+    defer allocator.free(str);
+    try std.testing.expectEqualStrings("s.whatsapp.net", str);
+}
+
+test "JID toString with device" {
+    const allocator = std.testing.allocator;
+
+    // Phone JID with device ID
+    const jid = JID{
+        .user = "559980000001",
+        .server = "s.whatsapp.net",
+        .agent = 0,
+        .device = 33,
+        .integrator = 0,
+        .allocator = allocator,
+    };
+    const str = try jid.toString(allocator);
+    defer allocator.free(str);
+    try std.testing.expectEqualStrings("559980000001:33@s.whatsapp.net", str);
+}
+
+test "JID toString simple" {
+    const allocator = std.testing.allocator;
+
+    // Simple phone JID
+    const jid = JID{
+        .user = "559980000001",
+        .server = "s.whatsapp.net",
+        .agent = 0,
+        .device = 0,
+        .integrator = 0,
+        .allocator = allocator,
+    };
+    const str = try jid.toString(allocator);
+    defer allocator.free(str);
+    try std.testing.expectEqualStrings("559980000001@s.whatsapp.net", str);
 }
 
 test "node with children encoding/decoding" {

@@ -1,5 +1,6 @@
 .zig-cache
 zig-out
+zig-pkg
 
 # Node.js
 node_modules/
@@ -8,3 +9,5 @@ yarn-debug.log*
 yarn-error.log*
 .npm/
 dist/
+/*.xml
+*.txt

@@ -1,0 +1,54 @@
+const std = @import("std");
+const binary = @import("binary");
+
+/// Events dispatched to the user's event handler.
+pub const Event = union(enum) {
+    /// QR code ready to display for pairing.
+    qr_code: QrCode,
+    /// Device successfully paired.
+    pair_success: PairSuccess,
+    /// Client fully connected and ready.
+    connected: Connected,
+    /// Incoming message.
+    message: Message,
+    /// Client disconnected.
+    disconnected: void,
+    /// Login failed.
+    login_failed: void,
+
+    pub const QrCode = struct {
+        /// Comma-separated: ref,noise_pub_b64,identity_pub_b64,adv_secret_b64
+        code: []const u8,
+    };
+
+    pub const PairSuccess = struct {
+        phone_jid: []const u8,
+        lid: []const u8,
+    };
+
+    pub const Connected = struct {
+        phone_jid: []const u8,
+        lid: []const u8,
+    };
+
+    pub const Message = struct {
+        /// Sender's JID
+        from: []const u8,
+        /// Chat JID (same as from for 1:1, group JID for groups)
+        chat: []const u8,
+        /// Message ID
+        id: []const u8,
+        /// The full message node (user can inspect children)
+        node: *const binary.Node,
+
+        /// Get text content from <enc> or direct body (if available)
+        pub fn getBody(self: Message) ?[]const u8 {
+            // Look for direct text content in the node
+            return self.node.getContentBytes();
+        }
+    };
+};
+
+/// Event handler function type.
+/// Called for each event with a pointer to the client for sending replies.
+pub const EventHandler = *const fn (event: Event, ctx: *anyopaque) void;

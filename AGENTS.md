@@ -1,236 +1,136 @@
-# Zig WhatsApp Binary Protocol Implementation - AI Coding Assistant Instructions
+# zigwhats — WhatsApp Web Client Library for Zig
 
-## Project Overview
+## Overview
 
-This is a Zig project that implements the WhatsApp binary protocol from scratch. The project provides a complete, memory-safe implementation of WhatsApp's binary message encoding/decoding, including varint encoding, token-based compression, and hierarchical node structures. Originally focused on Protocol Buffers, it has evolved into a comprehensive binary protocol library.
+A Zig library implementing the WhatsApp Web protocol: WebSocket transport, Noise XX handshake (AES-256-GCM + Curve25519), WA binary protocol encoding/decoding, and protobuf message handling. Targets Zig 0.16 (master/nightly).
+
+Reference implementation: `/home/jlucaso/projects/whatsapp-rust` (Rust, feature-complete). Always consult it for protocol correctness.
 
 ## Architecture
 
-### Core Components
+```
+src/
+├── client.zig            # High-level client: connect → handshake → encrypted I/O
+├── socket.zig            # NoiseSocket: post-handshake AES-256-GCM frame encrypt/decrypt
+├── noise.zig             # Noise XX state machine (handshake crypto)
+├── framing.zig           # WA frame codec (3-byte BE length prefix)
+├── websocket_client.zig  # Raw WebSocket client (ws:// and wss://, RFC 6455)
+├── xed25519.zig          # X25519 DH + Ed25519 signatures
+├── binary.zig            # WA binary protocol Node encode/decode
+├── root.zig              # Library re-exports
+├── main.zig              # CLI entry point
+└── gen/
+    ├── whatsapp.pb.zig   # Generated protobuf types
+    └── tokens_generated.zig  # Token dictionary (compile-time)
+tests/
+└── e2e.zig               # E2E tests against mock server (bartender)
+```
 
-- **`src/main.zig`**: Executable entry point that demonstrates all protocol features
-- **`src/root.zig`**: Library module containing demonstration functions for tokens, binary operations, and node encoding/decoding
-- **`src/binary.zig`**: Complete binary protocol implementation with Node, Attribute, and I/O structures
-- **`tokens.json`**: WhatsApp token dictionary for compression (loaded at runtime)
-- **`build.zig`**: Build configuration
-- **`build.zig.zon`**: Dependencies
+### Module Dependency Graph
 
-### Key Technologies
+```
+client → websocket_client, noise, xed25519, framing, socket, whatsapp_proto
+socket → websocket_client, framing
+noise  → xed25519
+```
 
-- **Zig 0.15.1**: Modern Zig with proper memory safety and performance
-- **Runtime Token System**: JSON-loaded token dictionary for efficient encoding
-- **Hierarchical Node Structures**: XML-like elements with attributes, content, and children
-- **Memory-Safe Design**: Comprehensive ownership semantics and RAII patterns
+### Key Types
 
-## Build System
+| Type | Module | Purpose |
+|------|--------|---------|
+| `Client` | client.zig | User-facing API: init, connect, receiveFrame, sendFrame |
+| `NoiseSocket` | socket.zig | Encrypted frame I/O with counter-mode AES-GCM |
+| `NoiseCipher` | socket.zig | Post-handshake AES-256-GCM (empty AAD, counter nonce) |
+| `Noise.NoiseState` | noise.zig | Handshake state: MixHash, MixKey, encrypt/decrypt with hash AAD |
+| `Noise.ClientHandshake` | noise.zig | Client-side Noise XX handshake |
+| `WebSocketClient` | websocket_client.zig | HTTP upgrade + WebSocket framing with client masking |
+| `FrameDecoder` | framing.zig | Streaming frame decoder (accumulate + extract) |
+| `XEd25519.KeyPair` | xed25519.zig | Combined X25519/Ed25519 keypair |
 
-### Commands
+## Build & Test
 
 ```bash
-zig build          # Build the project
-zig build run      # Build and run the executable
-zig build test     # Run all tests
+zig build              # Build executable
+zig build test         # Run unit tests
+zig build e2e          # Run e2e tests (requires mock server on localhost:8080)
+zig build run          # Build and run
+zig build gen-proto    # Regenerate protobuf types from proto/whatsapp.proto
 ```
 
-### Build Configuration
+### Mock Server
 
-- Uses `std.heap.page_allocator` for main execution
-- Uses `std.testing.allocator` for unit tests
-- Comprehensive test coverage for all protocol components
+E2E tests require the bartender mock server:
 
-## Development Workflow
-
-### Adding New Protocol Features
-
-1. Add new encoding/decoding functions to `src/binary.zig`
-2. Update token dictionary in `tokens.json` if needed
-3. Add demonstration functions in `src/root.zig`
-4. Add comprehensive unit tests
-
-### Testing Protocol
-
-1. Create test data structures in test functions
-2. Use `BinaryWriter` for encoding
-3. Use `BinaryReader` for decoding
-4. Compare original vs decoded data for validation
-
-## Code Patterns & Conventions
-
-### Binary Protocol Usage
-
-```zig
-// Encoding a node
-var buffer: [1024]u8 = undefined;
-var writer = binary.BinaryWriter.init(&buffer);
-_ = try binary.encodeNode(&node, &writer);
-const encoded = writer.getWritten();
-
-// Decoding a node
-var reader = binary.BinaryReader.init(encoded);
-var decoded_node = try binary.decodeNode(&reader, allocator);
-defer decoded_node.deinit();
+```bash
+# From the whatsapp-rust repo:
+cargo run -p whatsapp-mock-server -- --host 0.0.0.0 --no-tls \
+  --adv-secret-key AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
 ```
 
-### Token System
+Server listens on `ws://localhost:8080/ws/chat`. Tests connect without TLS.
 
-```zig
-// Get token for string
-const token = try getTokenForString("message");
-if (token.single_byte) |single| {
-    // Use single byte token
-}
+## Protocol Details
 
-// Get string for token
-const str = getStringForSingleByteToken(25);
-```
+### Connection Flow
 
-### Memory Management
+1. WebSocket connect to `wss://web.whatsapp.com/ws/chat` (or `ws://` for mock)
+2. Noise XX handshake:
+   - ClientHello: send ephemeral public key (framed with WA_CONN_HEADER `[0x57, 0x41, 0x06, 0x03]`)
+   - ServerHello: receive + decrypt server ephemeral, static key, certificate chain
+   - ClientFinish: encrypt + send client static key and ClientPayload (framed, no header)
+3. Extract cipher pair (write_key, read_key) via HKDF split
+4. Switch to NoiseSocket for encrypted communication
 
-- Use `std.heap.page_allocator` for demonstrations
-- Use `std.testing.allocator` for tests
-- Always call `deinit()` on nodes and attributes
-- Use `defer` for cleanup in demonstration functions
-- Avoid double allocation of strings - transfer ownership properly
+### Encryption Differences
 
-## Zig 0.15.1 Compatibility Workarounds
+| Phase | Cipher | AAD | Nonce |
+|-------|--------|-----|-------|
+| Handshake | AES-256-GCM | Hash state (h) | Counter-based, resets on MixKey |
+| Post-handshake | AES-256-GCM | Empty (`""`) | Counter-based, never resets |
 
-### Io.Writer Interface Changes
-
-- **Before**: `std.io.Writer` with `write` method
-- **Zig 0.15.1**: `std.Io.Writer` with `writer` field containing the actual writer
-- **Workaround**: Use `std.Io.Writer.Allocating` and access via `&writer.writer`
-
-### Reader Interface Changes
-
-- **Before**: `std.io.Reader` with `read` method
-- **Zig 0.15.1**: `std.Io.Reader` with different interface
-- **Workaround**: Use `std.Io.Reader.fixed(encoded_data)` for byte arrays
-
-### ArrayList API Changes
-
-- **Before**: `ArrayList.init(allocator)` and `append(item)`
-- **Zig 0.15.1**: `ArrayList.initCapacity(allocator, capacity)` and `append(allocator, item)`
-- **Workaround**: Always pass allocator as first parameter to ArrayList methods
-
-### Memory Management Patterns
-
-- **Slice Ownership**: Use `[]const u8` for owned strings, transfer ownership to avoid double allocation
-- **Attribute Storage**: Duplicate strings in `addAttribute()` to ensure proper ownership
-- **Token Handling**: Duplicate token strings during decoding to avoid lifetime issues
-- **Alignment Safety**: Page allocator requires page-aligned allocations; use proper allocators for different allocation sizes
-
-## Common Issues & Solutions
-
-### Runtime Issues
-
-1. **Memory leaks**: Always call `deinit()` on protobuf messages
-2. **Reader errors**: Ensure encoded data is valid before creating fixed reader
-3. **Hex display**: Use `std.Io.Writer.printHex(bytes, .lower)` for modern hex output
-
-### Memory Management Issues
-
-1. **Double allocation**: Avoid duplicating strings unnecessarily; transfer ownership properly
-2. **Slice lifetime**: Ensure decoded strings are properly owned by duplicating them
-3. **ArrayList methods**: Always pass allocator as first parameter in Zig 0.15.1
-4. **Attribute ownership**: Use `addAttribute()` which handles string duplication internally
-
-## Testing Strategy
-
-### Unit Tests
-
-- Test protobuf encoding/decoding round-trips
-- Validate field-by-field equality after serialization
-- Use `std.testing.expectEqual` for primitive fields
-- Use `std.testing.expectEqual` for enum values
-
-### Integration Tests
-
-- Test complete workflows (encode → decode → verify)
-- Test with various message types from WhatsApp proto
-- Validate hex output formatting
-
-## File Organization
+### Frame Format
 
 ```
-zigwhats/
-├── AGENTS.md           # AI coding assistant instructions
-├── build.zig           # Build configuration
-├── build.zig.zon       # Dependencies
-├── tokens.json         # WhatsApp token dictionary
-├── src/
-│   ├── main.zig        # Executable entry
-│   ├── root.zig        # Library functions
-│   └── binary.zig      # Binary protocol implementation
-├── zig-out/            # Build artifacts
-└── .github/
-    └── copilot-instructions.md  # Additional AI assistant context
+[optional header][3-byte BE length][payload]
 ```
 
-## Contributing Guidelines
+- ClientHello includes WA_CONN_HEADER (`WA\x06\x03`)
+- All subsequent frames: no header, just length + payload
+- Max frame size: 16 MB
 
-### Code Style
+### Post-Handshake Data Flow
 
-- Follow Zig standard formatting (`zig fmt`)
-- Use 4-space indentation
-- Use descriptive variable names
-- Add comments for complex protobuf operations
-
-### Commit Messages
-
-- Use imperative mood ("Add feature" not "Added feature")
-- Reference protobuf messages by name
-- Mention compatibility fixes explicitly
-
-### Pull Request Process
-
-1. Test all changes with `zig build test`
-2. Ensure protobuf generation works with `zig build gen-proto`
-3. Verify executable runs with `zig build run`
-4. Update documentation if adding new message types
+```
+WebSocket binary msg → FrameDecoder (3-byte length) → NoiseCipher.decrypt
+  → unpack (flag byte: bit 1 = zlib compressed, skip byte 0)
+  → binary.decodeNode → Node { tag, attrs, content }
+```
 
 ## Dependencies
 
-- **zig-protobuf**: `git+https://github.com/Arwalk/zig-protobuf?ref=zig-master`
-- **protoc**: Required for protobuf code generation
-- **curl**: Required for downloading protobuf dependencies
+- `zig-protobuf` (zig-master branch): protobuf encoding/decoding
+- No external WebSocket or TLS libraries — uses `std.http.Client` for TLS
 
-## Performance Considerations
+## Zig 0.16 API Notes
 
-- Use `std.heap.ArenaAllocator` for complex protobuf operations
-- Minimize allocations in hot paths
-- Consider reusing writers/readers when possible
-- Profile with `zig build --release=fast`
+- `main` accepts `std.process.Init` (provides `io: std.Io`, `gpa: Allocator`)
+- Randomness: `io.random(&buf)` (not `std.crypto.random`)
+- Ed25519: `KeyPair.generate(io)` (takes Io parameter)
+- I/O: `std.Io.Reader` / `std.Io.Writer` (vtable-based, buffered)
+- Protobuf encoding: `std.Io.Writer.Allocating`
+- Tests: `std.testing.io` (const, not function)
 
-## Future Enhancements
+## Reference Implementation
 
-- Add more WhatsApp message types
-- Implement streaming protobuf operations
-- Add JSON serialization support
-- Create benchmarking suite for protobuf performance
-- Add fuzz testing for message parsing
-- Create HTML/JavaScript wrapper for WASM module testing
-- Implement full protobuf functionality in WASM-compatible version
-- Optimize WASM binary size with build options
+The Rust library at `/home/jlucaso/projects/whatsapp-rust` is the authoritative reference:
 
-## Recent Updates
+| Zig module | Rust equivalent |
+|------------|----------------|
+| client.zig | src/handshake.rs + src/client.rs |
+| socket.zig | src/socket/noise_socket.rs |
+| noise.zig | wacore/noise/src/state.rs + handshake.rs |
+| framing.zig | wacore/noise/src/framing.rs |
+| binary.zig | wacore/binary/src/decoder.rs + encoder.rs |
+| xed25519.zig | Uses libsignal's Curve25519/Ed25519 |
 
-### Zig 0.15.1 Compatibility ✅
-
-- **Hex Printing**: Replaced manual hex loops with `std.fmt.format` using `{x:0>2}` format specifier
-- **Io.Writer Interface**: Using `std.Io.Writer.Allocating` with `&writer.writer` access pattern
-- **Io.Reader Interface**: Using `std.Io.Reader.fixed(encoded_data)` for byte arrays
-
-### WebAssembly Compilation ✅
-
-- **Rollup-Zigar Integration**: Implemented clean WASM development using rollup-plugin-zigar
-- **Pure Zig Code**: Removed manual WASM exports, using regular Zig functions with automatic binding
-- **Simplified Workflow**: Single `npm run build` command creates JavaScript with embedded WASM
-- **Automatic Memory Management**: Zigar handles memory allocation and string conversion automatically
-
-### Binary Protocol Implementation ✅
-
-- **Complete Node Encoding/Decoding**: Full support for hierarchical XML-like structures with attributes, content, and children
-- **Token-Based Compression**: Runtime-loaded WhatsApp token dictionary for efficient encoding
-- **Memory-Safe Design**: Comprehensive ownership semantics with proper RAII patterns
-- **ArrayList Compatibility**: Fixed Zig 0.15.1 ArrayList API changes (initCapacity, allocator parameters)
-- **Comprehensive Testing**: Unit tests covering all protocol components with 100% pass rate
+Always check the Rust implementation when something doesn't work as expected.
