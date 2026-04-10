@@ -11,16 +11,18 @@ pub fn buildUploadIq(
     prekeys: []const signal.keys.PreKey,
     registration_id: u32,
 ) !binary.Node {
-    var iq = try binary.Node.init(allocator, "iq");
+    var iq = binary.Node.initBorrowed(allocator, "iq");
     errdefer iq.deinit();
+    try iq.ensureAttributeCapacity(4);
+    try iq.ensureChildCapacity(5);
 
-    try iq.addAttribute("id", iq_id);
-    try iq.addAttribute("type", "set");
-    try iq.addAttribute("xmlns", "encrypt");
-    try iq.addAttribute("to", "s.whatsapp.net");
+    try iq.addAttributeBorrowed("id", iq_id);
+    try iq.addAttributeBorrowed("type", "set");
+    try iq.addAttributeBorrowed("xmlns", "encrypt");
+    try iq.addAttributeBorrowed("to", "s.whatsapp.net");
 
     // <registration>[4-byte BE u32]</registration>
-    var reg = try binary.Node.init(allocator, "registration");
+    var reg = binary.Node.initBorrowed(allocator, "registration");
     defer reg.deinit();
     var reg_bytes: [4]u8 = undefined;
     std.mem.writeInt(u32, &reg_bytes, registration_id, .big);
@@ -28,32 +30,33 @@ pub fn buildUploadIq(
     try iq.addChild(&reg);
 
     // <type>[0x05]</type>
-    var type_node = try binary.Node.init(allocator, "type");
+    var type_node = binary.Node.initBorrowed(allocator, "type");
     defer type_node.deinit();
-    try type_node.setContentBytes(&[_]u8{0x05});
+    try type_node.setContentBytesBorrowed(&[_]u8{0x05});
     try iq.addChild(&type_node);
 
     // <identity>[32 bytes]</identity>
-    var id_node = try binary.Node.init(allocator, "identity");
+    var id_node = binary.Node.initBorrowed(allocator, "identity");
     defer id_node.deinit();
     try id_node.setContentBytes(&identity.key_pair.public);
     try iq.addChild(&id_node);
 
     // <skey><id/><value/><signature/></skey>
-    var skey = try binary.Node.init(allocator, "skey");
+    var skey = binary.Node.initBorrowed(allocator, "skey");
     defer skey.deinit();
+    try skey.ensureChildCapacity(3);
     {
-        var sid = try binary.Node.init(allocator, "id");
+        var sid = binary.Node.initBorrowed(allocator, "id");
         defer sid.deinit();
         try sid.setContentBytes(&encodePreKeyId(signed_prekey.id));
         try skey.addChild(&sid);
 
-        var sval = try binary.Node.init(allocator, "value");
+        var sval = binary.Node.initBorrowed(allocator, "value");
         defer sval.deinit();
         try sval.setContentBytes(&signed_prekey.key_pair.public);
         try skey.addChild(&sval);
 
-        var ssig = try binary.Node.init(allocator, "signature");
+        var ssig = binary.Node.initBorrowed(allocator, "signature");
         defer ssig.deinit();
         try ssig.setContentBytes(&signed_prekey.signature);
         try skey.addChild(&ssig);
@@ -61,20 +64,22 @@ pub fn buildUploadIq(
     try iq.addChild(&skey);
 
     // <list><key>...</key>...</list>
-    var list = try binary.Node.init(allocator, "list");
+    var list = binary.Node.initBorrowed(allocator, "list");
     defer list.deinit();
+    try list.ensureChildCapacity(prekeys.len);
     for (prekeys) |*pk| {
-        var key_node = try binary.Node.init(allocator, "key");
+        var key_node = binary.Node.initBorrowed(allocator, "key");
         defer key_node.deinit();
+        try key_node.ensureChildCapacity(2);
 
-        var kid = try binary.Node.init(allocator, "id");
+        var kid = binary.Node.initBorrowed(allocator, "id");
         defer kid.deinit();
         try kid.setContentBytes(&encodePreKeyId(pk.id));
         try key_node.addChild(&kid);
 
-        var kval = try binary.Node.init(allocator, "value");
+        var kval = binary.Node.initBorrowed(allocator, "value");
         defer kval.deinit();
-        try kval.setContentBytes(&pk.key_pair.public);
+        try kval.setContentBytesBorrowed(&pk.key_pair.public);
         try key_node.addChild(&kval);
 
         try list.addChild(&key_node);

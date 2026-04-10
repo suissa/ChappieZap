@@ -16,9 +16,25 @@ pub fn build(b: *std.Build) void {
 
     // --- Modules ---
 
+    const jid_common_mod = b.addModule("jid_common", .{
+        .root_source_file = b.path("src/common/jid.zig"),
+        .target = target,
+    });
+
     const binary_mod = b.addModule("binary", .{
         .root_source_file = b.path("src/binary.zig"),
         .target = target,
+        .imports = &.{
+            .{ .name = "jid_common", .module = jid_common_mod },
+        },
+    });
+
+    const stanza_encode_mod = b.addModule("stanza_encode", .{
+        .root_source_file = b.path("src/stanza_encode.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "binary", .module = binary_mod },
+        },
     });
 
     const xed25519_mod = b.addModule("xed25519", .{
@@ -103,6 +119,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "binary", .module = binary_mod },
             .{ .name = "signal", .module = signal_mod },
+            .{ .name = "stanza_encode", .module = stanza_encode_mod },
         },
     });
 
@@ -116,6 +133,14 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const reporting_mod = b.addModule("reporting", .{
+        .root_source_file = b.path("src/messaging/reporting.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "binary", .module = binary_mod },
+        },
+    });
+
     const messaging_mod = b.addModule("messaging", .{
         .root_source_file = b.path("src/messaging.zig"),
         .target = target,
@@ -125,6 +150,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "prekey", .module = prekey_mod },
             .{ .name = "protobuf", .module = protobuf_mod },
             .{ .name = "whatsapp_proto", .module = wa_proto_mod },
+            .{ .name = "reporting", .module = reporting_mod },
         },
     });
 
@@ -141,6 +167,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .imports = &.{
             .{ .name = "binary", .module = binary_mod },
+            .{ .name = "jid_common", .module = jid_common_mod },
         },
     });
 
@@ -170,7 +197,9 @@ pub fn build(b: *std.Build) void {
             .{ .name = "events", .module = events_mod },
             .{ .name = "addressing", .module = addressing_mod },
             .{ .name = "usync", .module = usync_mod },
+            .{ .name = "jid_common", .module = jid_common_mod },
             .{ .name = "log", .module = log_mod },
+            .{ .name = "stanza_encode", .module = stanza_encode_mod },
         },
     });
 
@@ -193,6 +222,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "events", .module = events_mod },
             .{ .name = "addressing", .module = addressing_mod },
             .{ .name = "usync", .module = usync_mod },
+            .{ .name = "jid_common", .module = jid_common_mod },
             .{ .name = "log", .module = log_mod },
         },
     });
@@ -205,13 +235,36 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            // This CLI/demo executable is single-threaded and optimized for shipping size.
+            // Keep the library/test roots on default settings.
+            .single_threaded = if (optimize == .ReleaseSmall) true else null,
+            .unwind_tables = if (optimize == .ReleaseSmall) .none else null,
             .imports = &.{
                 .{ .name = "zigwhats", .module = mod },
             },
         }),
     });
+    if (optimize == .ReleaseSmall) {
+        exe.link_function_sections = true;
+        exe.link_data_sections = true;
+    }
 
     b.installArtifact(exe);
+
+    const profile_mem_exe = b.addExecutable(.{
+        .name = "profile-memory",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/profile_memory.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "client", .module = client_mod },
+                .{ .name = "websocket_client", .module = websocket_client_mod },
+                .{ .name = "socket", .module = socket_mod },
+                .{ .name = "handshake", .module = handshake_orch_mod },
+            },
+        }),
+    });
 
     const gen_proto = b.step("gen-proto", "generates zig files from protocol buffer definitions");
     const protoc_step = protobuf.RunProtocStep.create(protobuf_dep.builder, target, .{
@@ -257,4 +310,38 @@ pub fn build(b: *std.Build) void {
     const run_e2e_tests = b.addRunArtifact(e2e_tests);
     const e2e_step = b.step("e2e", "Run e2e tests (requires mock server)");
     e2e_step.dependOn(&run_e2e_tests.step);
+
+    const profile_e2e_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/profile_no_version.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "client", .module = client_mod },
+                .{ .name = "websocket_client", .module = websocket_client_mod },
+                .{ .name = "socket", .module = socket_mod },
+                .{ .name = "binary", .module = binary_mod },
+                .{ .name = "signal", .module = signal_mod },
+                .{ .name = "handshake", .module = handshake_orch_mod },
+                .{ .name = "node_handler", .module = node_handler_mod },
+                .{ .name = "prekey", .module = prekey_mod },
+                .{ .name = "messaging", .module = messaging_mod },
+                .{ .name = "pair", .module = pair_mod },
+                .{ .name = "whatsapp_proto", .module = wa_proto_mod },
+                .{ .name = "events", .module = events_mod },
+                .{ .name = "addressing", .module = addressing_mod },
+                .{ .name = "usync", .module = usync_mod },
+                .{ .name = "jid_common", .module = jid_common_mod },
+                .{ .name = "log", .module = log_mod },
+            },
+        }),
+    });
+
+    const run_profile_e2e_tests = b.addRunArtifact(profile_e2e_tests);
+    const profile_e2e_step = b.step("profile-e2e", "Run e2e tests without version fetch for profiling");
+    profile_e2e_step.dependOn(&run_profile_e2e_tests.step);
+
+    const run_profile_mem = b.addRunArtifact(profile_mem_exe);
+    const profile_mem_step = b.step("profile-mem", "Run allocator-based memory profiling report");
+    profile_mem_step.dependOn(&run_profile_mem.step);
 }

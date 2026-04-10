@@ -3,6 +3,8 @@ const Io = std.Io;
 const http = std.http;
 const crypto = std.crypto;
 
+const retained_read_capacity = 64 * 1024;
+
 /// Minimal WebSocket client built on std.http.Client for TLS + HTTP upgrade.
 /// Implements RFC 6455 framing with client-side masking.
 pub const WebSocketClient = struct {
@@ -11,6 +13,7 @@ pub const WebSocketClient = struct {
     http_client: *http.Client,
     connection: ?*http.Client.Connection = null,
     custom_ca_loaded: bool = false,
+    write_mask_buf: [4096]u8 = undefined,
 
     const Opcode = enum(u4) {
         continuation = 0,
@@ -58,14 +61,17 @@ pub const WebSocketClient = struct {
     }
 
     pub fn deinit(self: *WebSocketClient) void {
+        self.closeConnection();
+        self.http_client.deinit();
+        self.allocator.destroy(self.http_client);
+    }
+
+    pub fn closeConnection(self: *WebSocketClient) void {
         if (self.connection) |conn| {
-            // Remove from pool used list so client.deinit() doesn't assert
             self.http_client.connection_pool.used.remove(&conn.pool_node);
             conn.destroy(self.io);
             self.connection = null;
         }
-        self.http_client.deinit();
-        self.allocator.destroy(self.http_client);
     }
 
     /// Perform WebSocket handshake via HTTP upgrade
@@ -216,11 +222,12 @@ pub const WebSocketClient = struct {
         while (offset < data.len) {
             const remaining = data.len - offset;
             const chunk_size = @min(remaining, 4096);
-            var chunk_buf: [4096]u8 = undefined;
-            const chunk = chunk_buf[0..chunk_size];
+            const chunk = self.write_mask_buf[0..chunk_size];
+            var mask_index = offset & 3;
 
-            for (0..chunk_size) |i| {
-                chunk[i] = data[offset + i] ^ mask_key[(offset + i) % 4];
+            for (data[offset .. offset + chunk_size], 0..) |byte, i| {
+                chunk[i] = byte ^ mask_key[mask_index];
+                mask_index = (mask_index + 1) & 3;
             }
 
             try w.writeAll(chunk);
@@ -301,6 +308,77 @@ pub const WebSocketClient = struct {
                     .data = buf[0..len],
                 },
             }
+        }
+    }
+
+    /// Read the next WebSocket message into reusable storage.
+    /// The returned slice is invalidated by the next call that reuses `out`.
+    pub fn readMessageInto(
+        self: *WebSocketClient,
+        out: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+    ) !?Message {
+        const conn = self.connection orelse return error.NotConnected;
+        const r = conn.reader();
+
+        while (true) {
+            const header = try r.takeArray(2);
+            const h0: Header0 = @bitCast(header[0]);
+            const h1: Header1 = @bitCast(header[1]);
+
+            const payload_len: u64 = switch (h1.payload_len) {
+                .len16 => try r.takeInt(u16, .big),
+                .len64 => try r.takeInt(u64, .big),
+                else => @intFromEnum(h1.payload_len),
+            };
+
+            const len: usize = @intCast(payload_len);
+
+            var mask_key: [4]u8 = .{ 0, 0, 0, 0 };
+            if (h1.mask) {
+                const mk = try r.takeArray(4);
+                mask_key = mk.*;
+            }
+
+            resetReusableBuffer(out, allocator, len, retained_read_capacity);
+            const payload = try out.addManyAsSlice(allocator, len);
+
+            r.readSliceAll(payload) catch |err| switch (err) {
+                error.EndOfStream => return error.ConnectionClosed,
+                else => return err,
+            };
+
+            if (h1.mask) {
+                for (payload, 0..) |*byte, i| {
+                    byte.* ^= mask_key[i % 4];
+                }
+            }
+
+            switch (h0.opcode) {
+                .ping => {
+                    try self.writePong(payload);
+                    continue;
+                },
+                .pong => continue,
+                .connection_close => return null,
+                else => return .{
+                    .opcode = h0.opcode,
+                    .data = out.items,
+                },
+            }
+        }
+    }
+
+    fn resetReusableBuffer(
+        out: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        needed: usize,
+        max_retained: usize,
+    ) void {
+        if (out.capacity > max_retained and needed <= max_retained) {
+            out.clearAndFree(allocator);
+        } else {
+            out.clearRetainingCapacity();
         }
     }
 };

@@ -6,9 +6,8 @@ const whatsapp = @import("whatsapp_proto");
 const ADV_PREFIX_DEVICE_SIGNATURE_GENERATE = [_]u8{ 6, 1 };
 const ADV_HOSTED_PREFIX_DEVICE_SIGNATURE_VERIFICATION = [_]u8{ 6, 6 };
 
-/// Device props must stay wire-compatible with the Rust reference.
-/// The `os = "rust"` value is intentionally preserved because the real WA
-/// server is sensitive to this exact payload shape during pairing.
+/// Device props used in our pairing payload.
+/// We intentionally advertise `os = "zig"` for this client identity.
 pub fn makePairingDeviceProps() whatsapp.DeviceProps {
     return .{
         .os = "zig",
@@ -117,25 +116,44 @@ pub fn doPairCrypto(
     else
         &ADV_PREFIX_DEVICE_SIGNATURE_GENERATE;
 
-    const msg_to_sign = try concatBytes(allocator, &.{
-        sig_prefix,
-        inner_details_bytes,
-        &identity.key_pair.public,
-        account_sig_key_bytes,
-    });
-    defer allocator.free(msg_to_sign);
+    const msg_len = sig_prefix.len + inner_details_bytes.len + identity.key_pair.public.len + account_sig_key_bytes.len;
+    var msg_stack: [256]u8 = undefined;
+    const msg_to_sign = if (msg_len <= msg_stack.len)
+        msg_stack[0..msg_len]
+    else
+        try allocator.alloc(u8, msg_len);
+    defer if (msg_len > msg_stack.len) allocator.free(msg_to_sign);
+    {
+        var pos: usize = 0;
+        for ([_][]const u8{
+            sig_prefix,
+            inner_details_bytes,
+            &identity.key_pair.public,
+            account_sig_key_bytes,
+        }) |slice| {
+            @memcpy(msg_to_sign[pos..][0..slice.len], slice);
+            pos += slice.len;
+        }
+    }
 
     const device_signature = identity.sign(msg_to_sign, io);
-    if (signed_identity.deviceSignature) |old| allocator.free(old);
-    signed_identity.deviceSignature = try allocator.dupe(u8, &device_signature);
+    const response_identity = whatsapp.ADVSignedDeviceIdentity{
+        .details = signed_identity.details,
+        .accountSignatureKey = signed_identity.accountSignatureKey,
+        .accountSignature = signed_identity.accountSignature,
+        .deviceSignature = &device_signature,
+    };
 
     var details_reader: std.Io.Reader = .fixed(inner_details_bytes);
     var identity_details = try whatsapp.ADVDeviceIdentity.decode(&details_reader, allocator);
     defer identity_details.deinit(allocator);
 
-    var writer = std.Io.Writer.Allocating.init(allocator);
+    var writer = try std.Io.Writer.Allocating.initCapacity(
+        allocator,
+        details_bytes.len + account_sig_key_bytes.len + device_signature.len + 32,
+    );
     defer writer.deinit();
-    try signed_identity.encode(&writer.writer, allocator);
+    try response_identity.encode(&writer.writer, allocator);
 
     return .{
         .self_signed_identity_bytes = try writer.toOwnedSlice(),
@@ -150,25 +168,29 @@ pub fn buildPairDeviceSignResponse(
     device_identity_bytes: []const u8,
     key_index: u32,
 ) !binary.Node {
-    var iq = try binary.Node.init(allocator, "iq");
+    var iq = binary.Node.initBorrowed(allocator, "iq");
     errdefer iq.deinit();
+    try iq.ensureAttributeCapacity(3);
+    try iq.ensureChildCapacity(1);
 
-    try iq.addAttribute("to", "s.whatsapp.net");
-    try iq.addAttribute("id", iq_id);
-    try iq.addAttribute("type", "result");
+    try iq.addAttributeBorrowed("to", "s.whatsapp.net");
+    try iq.addAttributeBorrowed("id", iq_id);
+    try iq.addAttributeBorrowed("type", "result");
 
     // <pair-device-sign>
-    var pds = try binary.Node.init(allocator, "pair-device-sign");
+    var pds = binary.Node.initBorrowed(allocator, "pair-device-sign");
     defer pds.deinit();
+    try pds.ensureChildCapacity(1);
 
     // <device-identity key-index="0">[protobuf bytes]</device-identity>
-    var di = try binary.Node.init(allocator, "device-identity");
+    var di = binary.Node.initBorrowed(allocator, "device-identity");
     defer di.deinit();
+    try di.ensureAttributeCapacity(1);
 
     var ki_buf: [10]u8 = undefined;
     const ki_str = std.fmt.bufPrint(&ki_buf, "{d}", .{key_index}) catch "0";
     try di.addAttribute("key-index", ki_str);
-    try di.setContentBytes(device_identity_bytes);
+    try di.setContentBytesBorrowed(device_identity_bytes);
     try pds.addChild(&di);
 
     try iq.addChild(&pds);
@@ -384,17 +406,4 @@ fn signWithRandom(private_key: [32]u8, msg: []const u8, random_bytes: [64]u8) [6
     sig[63] &= 0x7F;
     sig[63] |= sign_bit;
     return sig;
-}
-
-fn concatBytes(allocator: std.mem.Allocator, slices: []const []const u8) ![]u8 {
-    var total: usize = 0;
-    for (slices) |slice| total += slice.len;
-
-    const out = try allocator.alloc(u8, total);
-    var pos: usize = 0;
-    for (slices) |slice| {
-        @memcpy(out[pos..][0..slice.len], slice);
-        pos += slice.len;
-    }
-    return out;
 }

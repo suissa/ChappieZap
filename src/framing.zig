@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const FRAME_LENGTH_SIZE: usize = 3;
 pub const FRAME_MAX_SIZE: usize = 2 << 23; // 16 MB
+const retained_decoder_capacity = 64 * 1024;
 
 /// Encode a payload into a WhatsApp frame: [optional header][3-byte BE length][payload]
 pub fn encodeFrame(allocator: std.mem.Allocator, payload: []const u8, header: ?[]const u8) ![]u8 {
@@ -40,7 +41,7 @@ pub fn encodeFrameInto(
     const header_len = if (header) |h| h.len else 0;
     const total = header_len + FRAME_LENGTH_SIZE + payload.len;
 
-    out.clearRetainingCapacity();
+    resetReusableBuffer(out, allocator, total);
     const frame = try out.addManyAsSlice(allocator, total);
     var offset: usize = 0;
 
@@ -62,11 +63,13 @@ pub fn encodeFrameInto(
 pub const FrameDecoder = struct {
     buffer: std.ArrayList(u8),
     allocator: std.mem.Allocator,
+    start: usize,
 
     pub fn init(allocator: std.mem.Allocator) FrameDecoder {
         return .{
             .buffer = .empty,
             .allocator = allocator,
+            .start = 0,
         };
     }
 
@@ -75,37 +78,88 @@ pub const FrameDecoder = struct {
     }
 
     pub fn feed(self: *FrameDecoder, data: []const u8) !void {
-        try self.buffer.appendSlice(self.allocator, data);
+        if (data.len == 0) return;
+
+        const unread_len = self.buffer.items.len - self.start;
+        if (self.start != 0 and unread_len + data.len > self.buffer.capacity) {
+            self.compact();
+        }
+
+        try self.buffer.ensureUnusedCapacity(self.allocator, data.len);
+        self.buffer.appendSliceAssumeCapacity(data);
     }
 
     /// Extract the next complete frame, or null if not enough data.
     pub fn decodeFrame(self: *FrameDecoder) ?[]const u8 {
-        if (self.buffer.items.len < FRAME_LENGTH_SIZE) return null;
+        const unread = self.buffer.items[self.start..];
+        if (unread.len < FRAME_LENGTH_SIZE) return null;
 
-        const frame_len: usize = (@as(usize, self.buffer.items[0]) << 16) |
-            (@as(usize, self.buffer.items[1]) << 8) |
-            @as(usize, self.buffer.items[2]);
+        const frame_len: usize = (@as(usize, unread[0]) << 16) |
+            (@as(usize, unread[1]) << 8) |
+            @as(usize, unread[2]);
 
         if (frame_len > FRAME_MAX_SIZE) {
             // Invalid frame, skip the length prefix
-            self.buffer.replaceRange(self.allocator, 0, FRAME_LENGTH_SIZE, &.{}) catch return null;
+            self.start += FRAME_LENGTH_SIZE;
+            self.trimConsumed();
             return null;
         }
 
         const total_needed = FRAME_LENGTH_SIZE + frame_len;
-        if (self.buffer.items.len < total_needed) return null;
+        if (unread.len < total_needed) return null;
 
         // Return slice into buffer (caller must use before next feed/decode)
-        return self.buffer.items[FRAME_LENGTH_SIZE..total_needed];
+        const frame_start = self.start + FRAME_LENGTH_SIZE;
+        return self.buffer.items[frame_start .. frame_start + frame_len];
     }
 
     /// Consume the last decoded frame from the buffer.
     /// Must be called after decodeFrame() returns non-null.
     pub fn consume(self: *FrameDecoder, frame_len: usize) void {
-        const total = FRAME_LENGTH_SIZE + frame_len;
-        self.buffer.replaceRange(self.allocator, 0, total, &.{}) catch {};
+        self.start += FRAME_LENGTH_SIZE + frame_len;
+        self.trimConsumed();
+    }
+
+    fn trimConsumed(self: *FrameDecoder) void {
+        if (self.start == 0) return;
+
+        if (self.start == self.buffer.items.len) {
+            if (self.buffer.capacity > retained_decoder_capacity) {
+                self.buffer.clearAndFree(self.allocator);
+            } else {
+                self.buffer.clearRetainingCapacity();
+            }
+            self.start = 0;
+            return;
+        }
+
+        const unread_len = self.buffer.items.len - self.start;
+        if (self.start >= self.buffer.capacity / 2 or unread_len == 0) {
+            self.compact();
+        }
+    }
+
+    fn compact(self: *FrameDecoder) void {
+        if (self.start == 0) return;
+
+        const unread_len = self.buffer.items.len - self.start;
+        @memmove(self.buffer.items[0..unread_len], self.buffer.items[self.start..]);
+        self.buffer.items.len = unread_len;
+        self.start = 0;
     }
 };
+
+fn resetReusableBuffer(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    needed: usize,
+) void {
+    if (out.capacity > retained_decoder_capacity and needed <= retained_decoder_capacity) {
+        out.clearAndFree(allocator);
+    } else {
+        out.clearRetainingCapacity();
+    }
+}
 
 test "encode frame no header" {
     const allocator = std.testing.allocator;

@@ -4,10 +4,9 @@ const protobuf = @import("protobuf");
 const signal = @import("signal");
 const prekey_mod = @import("prekey");
 const whatsapp = @import("whatsapp_proto");
-const crypto = std.crypto;
+const reporting = @import("reporting");
 const fd = protobuf.fd;
-const HkdfSha256 = crypto.kdf.hkdf.HkdfSha256;
-const HmacSha256 = crypto.auth.hmac.sha2.HmacSha256;
+const retained_message_capacity = 64 * 1024;
 // Protobuf field numbers from wa.Message:
 // field 1  = conversation (string)
 // field 6  = extendedTextMessage (submessage) → field 1 = text
@@ -15,21 +14,21 @@ const HmacSha256 = crypto.auth.hmac.sha2.HmacSha256;
 
 /// Build a prekey fetch IQ: <iq xmlns="encrypt" type="get"><key><user jid="..."/></key></iq>
 pub fn buildFetchPrekeysIq(allocator: std.mem.Allocator, iq_id: []const u8, jids: []const []const u8) !binary.Node {
-    var iq = try binary.Node.init(allocator, "iq");
+    var iq = binary.Node.initBorrowed(allocator, "iq");
     errdefer iq.deinit();
 
-    try iq.addAttribute("id", iq_id);
-    try iq.addAttribute("type", "get");
-    try iq.addAttribute("xmlns", "encrypt");
-    try iq.addAttribute("to", "s.whatsapp.net");
+    try iq.addAttributeBorrowed("id", iq_id);
+    try iq.addAttributeBorrowed("type", "get");
+    try iq.addAttributeBorrowed("xmlns", "encrypt");
+    try iq.addAttributeBorrowed("to", "s.whatsapp.net");
 
-    var key_node = try binary.Node.init(allocator, "key");
+    var key_node = binary.Node.initBorrowed(allocator, "key");
     defer key_node.deinit();
 
     for (jids) |jid| {
-        var user_node = try binary.Node.init(allocator, "user");
+        var user_node = binary.Node.initBorrowed(allocator, "user");
         defer user_node.deinit();
-        try user_node.addAttribute("jid", jid);
+        try user_node.addAttributeBorrowed("jid", jid);
         try key_node.addChild(&user_node);
     }
 
@@ -46,15 +45,12 @@ pub fn buildFetchPrekeysIq(allocator: std.mem.Allocator, iq_id: []const u8, jids
 /// </message>
 pub const DirectParticipant = struct {
     jid: []const u8,
+    jid_owned: ?[]u8 = null,
     ciphertext: []const u8,
     is_prekey: bool,
 };
 
-pub const ReportingContext = struct {
-    message_secret: [32]u8,
-    reporting_token: [16]u8,
-    version: i32 = 2,
-};
+pub const ReportingContext = reporting.ReportingContext;
 
 const OutboundMessage = struct {
     conversation: ?[]const u8 = null,
@@ -121,40 +117,40 @@ pub fn buildFanoutMessageNode(
     participants_data: []const DirectParticipant,
     device_identity_bytes: ?[]const u8,
 ) !binary.Node {
-    var msg = try binary.Node.init(allocator, "message");
+    var any_prekey = false;
+    for (participants_data) |participant| any_prekey = any_prekey or participant.is_prekey;
+
+    var msg = binary.Node.initBorrowed(allocator, "message");
     errdefer msg.deinit();
 
-    try msg.addAttribute("to", chat_jid);
-    try msg.addAttribute("id", msg_id);
-    try msg.addAttribute("type", "text");
+    try msg.addAttributeBorrowed("to", chat_jid);
+    try msg.addAttributeBorrowed("id", msg_id);
+    try msg.addAttributeBorrowed("type", "text");
 
-    var participants = try binary.Node.init(allocator, "participants");
+    var participants = binary.Node.initBorrowed(allocator, "participants");
     defer participants.deinit();
 
-    var any_prekey = false;
     for (participants_data) |participant| {
-        var to_node = try binary.Node.init(allocator, "to");
+        var to_node = binary.Node.initBorrowed(allocator, "to");
         defer to_node.deinit();
-        try to_node.addAttribute("jid", participant.jid);
+        try to_node.addAttributeBorrowed("jid", participant.jid);
 
-        var enc_node = try binary.Node.init(allocator, "enc");
+        var enc_node = binary.Node.initBorrowed(allocator, "enc");
         defer enc_node.deinit();
-        try enc_node.addAttribute("v", "2");
-        try enc_node.addAttribute("type", if (participant.is_prekey) "pkmsg" else "msg");
-        try enc_node.setContentBytes(participant.ciphertext);
+        try enc_node.addAttributeBorrowed("v", "2");
+        try enc_node.addAttributeBorrowed("type", if (participant.is_prekey) "pkmsg" else "msg");
+        try enc_node.setContentBytesBorrowed(participant.ciphertext);
         try to_node.addChild(&enc_node);
         try participants.addChild(&to_node);
-
-        any_prekey = any_prekey or participant.is_prekey;
     }
 
     try msg.addChild(&participants);
 
     if (any_prekey) {
         if (device_identity_bytes) |bytes| {
-            var device_identity = try binary.Node.init(allocator, "device-identity");
+            var device_identity = binary.Node.initBorrowed(allocator, "device-identity");
             defer device_identity.deinit();
-            try device_identity.setContentBytes(bytes);
+            try device_identity.setContentBytesBorrowed(bytes);
             try msg.addChild(&device_identity);
         }
     }
@@ -206,23 +202,43 @@ pub fn encodeTextMessage(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     return encodeTextMessageWithContext(allocator, text, null);
 }
 
+pub fn encodeTextMessageInto(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    text: []const u8,
+) ![]const u8 {
+    return encodeTextMessageWithContextInto(out, allocator, text, null);
+}
+
 pub fn encodeTextMessageWithContext(
     allocator: std.mem.Allocator,
     text: []const u8,
-    reporting: ?*const ReportingContext,
+    reporting_ctx: ?*const ReportingContext,
 ) ![]u8 {
-    var writer = std.Io.Writer.Allocating.init(allocator);
-    defer writer.deinit();
-
     const msg = OutboundMessage{
         .conversation = text,
-        .messageContextInfo = if (reporting) |ctx| .{
+        .messageContextInfo = if (reporting_ctx) |ctx| .{
             .messageSecret = &ctx.message_secret,
             .reportingTokenVersion = ctx.version,
         } else null,
     };
-    try msg.encode(&writer.writer, allocator);
-    return writer.toOwnedSlice();
+    return encodeOutboundMessageAlloc(allocator, msg);
+}
+
+pub fn encodeTextMessageWithContextInto(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    text: []const u8,
+    reporting_ctx: ?*const ReportingContext,
+) ![]const u8 {
+    const msg = OutboundMessage{
+        .conversation = text,
+        .messageContextInfo = if (reporting_ctx) |ctx| .{
+            .messageSecret = &ctx.message_secret,
+            .reportingTokenVersion = ctx.version,
+        } else null,
+    };
+    return encodeOutboundMessageInto(out, allocator, msg);
 }
 
 /// Wrap a text message in DeviceSentMessage for self-chat / own-device sync.
@@ -235,15 +251,24 @@ pub fn encodeDeviceSentTextMessage(
     return encodeDeviceSentTextMessageWithContext(allocator, destination_jid, text, null);
 }
 
+pub fn encodeDeviceSentTextMessageInto(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    destination_jid: []const u8,
+    text: []const u8,
+) ![]const u8 {
+    return encodeDeviceSentTextMessageWithContextInto(out, allocator, destination_jid, text, null);
+}
+
 pub fn encodeDeviceSentTextMessageWithContext(
     allocator: std.mem.Allocator,
     destination_jid: []const u8,
     text: []const u8,
-    reporting: ?*const ReportingContext,
+    reporting_ctx: ?*const ReportingContext,
 ) ![]u8 {
     const inner = OutboundMessage{
         .conversation = text,
-        .messageContextInfo = if (reporting) |ctx| .{
+        .messageContextInfo = if (reporting_ctx) |ctx| .{
             .messageSecret = &ctx.message_secret,
             .reportingTokenVersion = ctx.version,
         } else null,
@@ -255,11 +280,31 @@ pub fn encodeDeviceSentTextMessageWithContext(
             .phash = "",
         },
     };
+    return encodeOutboundMessageAlloc(allocator, outer);
+}
 
-    var writer = std.Io.Writer.Allocating.init(allocator);
-    defer writer.deinit();
-    try outer.encode(&writer.writer, allocator);
-    return writer.toOwnedSlice();
+pub fn encodeDeviceSentTextMessageWithContextInto(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    destination_jid: []const u8,
+    text: []const u8,
+    reporting_ctx: ?*const ReportingContext,
+) ![]const u8 {
+    const inner = OutboundMessage{
+        .conversation = text,
+        .messageContextInfo = if (reporting_ctx) |ctx| .{
+            .messageSecret = &ctx.message_secret,
+            .reportingTokenVersion = ctx.version,
+        } else null,
+    };
+    const outer = OutboundMessage{
+        .deviceSentMessage = .{
+            .destinationJid = destination_jid,
+            .message = &inner,
+            .phash = "",
+        },
+    };
+    return encodeOutboundMessageInto(out, allocator, outer);
 }
 
 pub fn generateReportingContextForText(
@@ -270,48 +315,22 @@ pub fn generateReportingContextForText(
     sender_jid: []const u8,
     remote_jid: []const u8,
 ) !ReportingContext {
-    var message_secret: [32]u8 = undefined;
-    io.random(&message_secret);
-
-    const content = try encodeTextMessage(allocator, text);
-    defer allocator.free(content);
-
-    var info = std.ArrayList(u8).empty;
-    defer info.deinit(allocator);
-    try info.appendSlice(allocator, stanza_id);
-    try info.appendSlice(allocator, sender_jid);
-    try info.appendSlice(allocator, remote_jid);
-    try info.appendSlice(allocator, "Report Token");
-
-    const prk = HkdfSha256.extract("", &message_secret);
-    var key: [32]u8 = undefined;
-    HkdfSha256.expand(&key, info.items, prk);
-
-    var mac: [HmacSha256.mac_length]u8 = undefined;
-    HmacSha256.create(&mac, content, &key);
-
-    var token: [16]u8 = undefined;
-    @memcpy(&token, mac[0..16]);
-
-    return .{
-        .message_secret = message_secret,
-        .reporting_token = token,
-    };
+    return reporting.generateReportingContextForText(
+        encodeTextMessage,
+        allocator,
+        io,
+        text,
+        stanza_id,
+        sender_jid,
+        remote_jid,
+    );
 }
 
 pub fn buildReportingNode(
     allocator: std.mem.Allocator,
-    reporting: *const ReportingContext,
+    reporting_ctx: *const ReportingContext,
 ) !binary.Node {
-    var reporting_node = try binary.Node.init(allocator, "reporting");
-    errdefer reporting_node.deinit();
-
-    var token_node = try binary.Node.init(allocator, "reporting_token");
-    errdefer token_node.deinit();
-    try token_node.addAttribute("v", "2");
-    try token_node.setContentBytes(&reporting.reporting_token);
-    try reporting_node.addChild(&token_node);
-    return reporting_node;
+    return reporting.buildReportingNode(allocator, reporting_ctx);
 }
 
 /// Decode protobuf Message and extract text content.
@@ -377,6 +396,32 @@ fn pbVarint(data: []const u8, pos: *usize) ?u64 {
         shift = std.math.add(u6, shift, 7) catch return null;
     }
     return null;
+}
+
+fn encodeOutboundMessageAlloc(allocator: std.mem.Allocator, msg: anytype) ![]u8 {
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(allocator);
+    _ = try encodeOutboundMessageInto(&out, allocator, msg);
+    return out.toOwnedSlice(allocator);
+}
+
+fn encodeOutboundMessageInto(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    msg: anytype,
+) ![]const u8 {
+    if (out.capacity > retained_message_capacity) {
+        out.clearAndFree(allocator);
+    }
+    var writer = std.Io.Writer.Allocating.fromArrayList(allocator, out);
+    errdefer writer.deinit();
+
+    writer.clearRetainingCapacity();
+    try msg.encode(&writer.writer, allocator);
+
+    const written_len = writer.written().len;
+    out.* = writer.toArrayList();
+    return out.items[0..written_len];
 }
 
 test "buildMessageNode uses participants fanout shape" {
@@ -485,12 +530,12 @@ test "encodeDeviceSentTextMessage wraps payload in DeviceSentMessage" {
 test "encodeTextMessageWithContext adds message context" {
     const allocator = std.testing.allocator;
 
-    const reporting = ReportingContext{
+    const reporting_ctx = ReportingContext{
         .message_secret = [_]u8{1} ** 32,
         .reporting_token = [_]u8{2} ** 16,
     };
 
-    const encoded = try encodeTextMessageWithContext(allocator, "pong", &reporting);
+    const encoded = try encodeTextMessageWithContext(allocator, "pong", &reporting_ctx);
     defer allocator.free(encoded);
 
     var reader: std.Io.Reader = .fixed(encoded);
@@ -498,7 +543,7 @@ test "encodeTextMessageWithContext adds message context" {
     defer msg.deinit(allocator);
 
     const ctx = msg.messageContextInfo orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualSlices(u8, &reporting.message_secret, ctx.messageSecret orelse &.{});
+    try std.testing.expectEqualSlices(u8, &reporting_ctx.message_secret, ctx.messageSecret orelse &.{});
     try std.testing.expectEqual(@as(i32, 2), ctx.reportingTokenVersion orelse 0);
 }
 

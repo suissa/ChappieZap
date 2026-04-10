@@ -1,6 +1,15 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zigwhats = @import("zigwhats");
 const log = zigwhats.log;
+
+pub const std_options: std.Options = switch (builtin.mode) {
+    .ReleaseSmall => .{
+        .signal_stack_size = null,
+        .allow_stack_tracing = false,
+    },
+    else => .{},
+};
 
 var qr_count: usize = 0;
 

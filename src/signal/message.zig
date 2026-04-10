@@ -5,49 +5,28 @@ const session_mod = @import("session.zig");
 const SIGNAL_VERSION: u8 = 3;
 const VERSION_BYTE: u8 = (SIGNAL_VERSION << 4) | 0x03;
 const MAC_LENGTH: usize = 8;
+const CURVE25519_KEY_TYPE_PREFIX: u8 = 0x05;
 
 /// Serialize a SignalMessage to wire format:
 /// [VERSION_BYTE][protobuf(ratchet_key, counter, prev_counter, ciphertext)][8-byte MAC]
 pub fn serializeSignalMessage(allocator: std.mem.Allocator, msg: *const session_mod.EncryptedMessage) ![]u8 {
-    // Encode protobuf fields manually (Signal uses proto2 with specific field numbers)
-    var proto = std.ArrayList(u8).empty;
-    defer proto.deinit(allocator);
+    const proto_len = signalMessageProtoLen(msg);
+    const result = try allocator.alloc(u8, 1 + proto_len + MAC_LENGTH);
 
-    // Field 1: ratchet_key (bytes), wire type 2 (length-delimited)
-    // Key format: 0x05 prefix + 32 bytes
-    try proto.append(allocator, 0x0A); // field 1, wire type 2
-    try proto.append(allocator, 33); // length: 1 prefix + 32 key bytes
-    try proto.append(allocator, 0x05); // Curve25519 key type prefix
-    try proto.appendSlice(allocator, &msg.ratchet_key);
+    var pos: usize = 0;
+    result[pos] = VERSION_BYTE;
+    pos += 1;
 
-    // Field 2: counter (uint32), wire type 0 (varint)
-    try proto.append(allocator, 0x10); // field 2, wire type 0
-    try appendVarint(&proto, allocator, msg.counter);
+    writeCurve25519KeyField(result, &pos, 0x0A, &msg.ratchet_key);
+    writeVarintField(result, &pos, 0x10, msg.counter);
+    writeVarintField(result, &pos, 0x18, msg.previous_counter);
+    writeBytesField(result, &pos, 0x22, msg.ciphertext);
 
-    // Field 3: previous_counter (uint32), wire type 0 (varint)
-    try proto.append(allocator, 0x18); // field 3, wire type 0
-    try appendVarint(&proto, allocator, msg.previous_counter);
+    const mac = msg.computeMac(result[0..pos]);
+    @memcpy(result[pos..][0..MAC_LENGTH], &mac);
+    pos += MAC_LENGTH;
 
-    // Field 4: ciphertext (bytes), wire type 2 (length-delimited)
-    try proto.append(allocator, 0x22); // field 4, wire type 2
-    try appendVarint(&proto, allocator, @intCast(msg.ciphertext.len));
-    try proto.appendSlice(allocator, msg.ciphertext);
-
-    // Build: VERSION_BYTE + proto_bytes
-    const proto_bytes = proto.items;
-    const msg_without_mac = try allocator.alloc(u8, 1 + proto_bytes.len);
-    defer allocator.free(msg_without_mac);
-    msg_without_mac[0] = VERSION_BYTE;
-    @memcpy(msg_without_mac[1..], proto_bytes);
-
-    // Compute MAC over the message (without MAC)
-    const mac = msg.computeMac(msg_without_mac);
-
-    // Final: VERSION_BYTE + proto_bytes + 8-byte MAC
-    const result = try allocator.alloc(u8, msg_without_mac.len + MAC_LENGTH);
-    @memcpy(result[0..msg_without_mac.len], msg_without_mac);
-    @memcpy(result[msg_without_mac.len..], &mac);
-
+    std.debug.assert(pos == result.len);
     return result;
 }
 
@@ -62,45 +41,29 @@ pub fn serializePreKeySignalMessage(
     identity_key: [32]u8,
     signal_message: []const u8,
 ) ![]u8 {
-    var proto = std.ArrayList(u8).empty;
-    defer proto.deinit(allocator);
+    const proto_len = preKeySignalMessageProtoLen(
+        registration_id,
+        prekey_id,
+        signed_prekey_id,
+        signal_message.len,
+    );
+    const result = try allocator.alloc(u8, 1 + proto_len);
 
-    // Field 5: registration_id (uint32), wire type 0
-    try proto.append(allocator, 0x28); // field 5, wire type 0
-    try appendVarint(&proto, allocator, registration_id);
+    var pos: usize = 0;
+    result[pos] = VERSION_BYTE;
+    pos += 1;
 
-    // Field 1: prekey_id (uint32), wire type 0 — optional
+    // Preserve the existing field write order exactly.
+    writeVarintField(result, &pos, 0x28, registration_id);
     if (prekey_id) |pk_id| {
-        try proto.append(allocator, 0x08); // field 1, wire type 0
-        try appendVarint(&proto, allocator, pk_id);
+        writeVarintField(result, &pos, 0x08, pk_id);
     }
+    writeVarintField(result, &pos, 0x30, signed_prekey_id);
+    writeCurve25519KeyField(result, &pos, 0x12, &base_key);
+    writeCurve25519KeyField(result, &pos, 0x1A, &identity_key);
+    writeBytesField(result, &pos, 0x22, signal_message);
 
-    // Field 6: signed_prekey_id (uint32), wire type 0
-    try proto.append(allocator, 0x30); // field 6, wire type 0
-    try appendVarint(&proto, allocator, signed_prekey_id);
-
-    // Field 2: base_key (bytes), wire type 2 — 0x05 prefix + 32 bytes
-    try proto.append(allocator, 0x12); // field 2, wire type 2
-    try proto.append(allocator, 33);
-    try proto.append(allocator, 0x05);
-    try proto.appendSlice(allocator, &base_key);
-
-    // Field 3: identity_key (bytes), wire type 2 — 0x05 prefix + 32 bytes
-    try proto.append(allocator, 0x1A); // field 3, wire type 2
-    try proto.append(allocator, 33);
-    try proto.append(allocator, 0x05);
-    try proto.appendSlice(allocator, &identity_key);
-
-    // Field 4: message (bytes), wire type 2 — the SignalMessage
-    try proto.append(allocator, 0x22); // field 4, wire type 2
-    try appendVarint(&proto, allocator, @intCast(signal_message.len));
-    try proto.appendSlice(allocator, signal_message);
-
-    // Build: VERSION_BYTE + proto_bytes
-    const result = try allocator.alloc(u8, 1 + proto.items.len);
-    result[0] = VERSION_BYTE;
-    @memcpy(result[1..], proto.items);
-
+    std.debug.assert(pos == result.len);
     return result;
 }
 
@@ -252,6 +215,85 @@ pub fn parsePreKeySignalMessage(data: []const u8) !ParsedPreKeyMessage {
 
 // --- Helpers ---
 
+fn signalMessageProtoLen(msg: *const session_mod.EncryptedMessage) usize {
+    return curve25519KeyFieldLen() +
+        varintFieldLen(msg.counter) +
+        varintFieldLen(msg.previous_counter) +
+        bytesFieldLen(msg.ciphertext.len);
+}
+
+fn preKeySignalMessageProtoLen(
+    registration_id: u32,
+    prekey_id: ?u32,
+    signed_prekey_id: u32,
+    signal_message_len: usize,
+) usize {
+    return varintFieldLen(registration_id) +
+        (if (prekey_id) |pk_id| varintFieldLen(pk_id) else 0) +
+        varintFieldLen(signed_prekey_id) +
+        curve25519KeyFieldLen() +
+        curve25519KeyFieldLen() +
+        bytesFieldLen(signal_message_len);
+}
+
+fn curve25519KeyFieldLen() usize {
+    return 1 + 1 + 1 + 32;
+}
+
+fn varintFieldLen(value: u32) usize {
+    return 1 + varintSize(value);
+}
+
+fn bytesFieldLen(data_len: usize) usize {
+    return 1 + varintSize(data_len) + data_len;
+}
+
+fn varintSize(value: anytype) usize {
+    var v: u64 = @intCast(value);
+    var len: usize = 1;
+    while (v >= 0x80) {
+        len += 1;
+        v >>= 7;
+    }
+    return len;
+}
+
+fn writeVarintField(out: []u8, pos: *usize, tag: u8, value: u32) void {
+    out[pos.*] = tag;
+    pos.* += 1;
+    writeVarintInto(out, pos, value);
+}
+
+fn writeCurve25519KeyField(out: []u8, pos: *usize, tag: u8, key: *const [32]u8) void {
+    out[pos.*] = tag;
+    pos.* += 1;
+    out[pos.*] = 33;
+    pos.* += 1;
+    out[pos.*] = CURVE25519_KEY_TYPE_PREFIX;
+    pos.* += 1;
+    @memcpy(out[pos.*..][0..key.len], key);
+    pos.* += key.len;
+}
+
+fn writeBytesField(out: []u8, pos: *usize, tag: u8, data: []const u8) void {
+    out[pos.*] = tag;
+    pos.* += 1;
+    writeVarintInto(out, pos, data.len);
+    @memcpy(out[pos.*..][0..data.len], data);
+    pos.* += data.len;
+}
+
+fn writeVarintInto(out: []u8, pos: *usize, value: anytype) void {
+    var v: u64 = @intCast(value);
+    while (v >= 0x80) {
+        out[pos.*] = @intCast((v & 0x7F) | 0x80);
+        pos.* += 1;
+        v >>= 7;
+    }
+    out[pos.*] = @intCast(v);
+    pos.* += 1;
+}
+
 fn appendVarint(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u64) !void {
     var v = value;
     while (v >= 0x80) {
@@ -291,4 +333,156 @@ fn skipField(data: []const u8, pos: usize, wire_type: u8) !usize {
         else => return error.UnknownWireType,
     }
     return p;
+}
+
+test "serializeSignalMessage matches legacy bytes" {
+    const allocator = std.testing.allocator;
+
+    const ciphertext = &[_]u8{ 0xDE, 0xAD, 0xBE, 0xEF, 0x01 };
+    const msg = session_mod.EncryptedMessage{
+        .ratchet_key = makePattern32(0x10),
+        .counter = 300,
+        .previous_counter = 17,
+        .ciphertext = @constCast(ciphertext),
+        .sender_identity = makePattern32(0x30),
+        .receiver_identity = makePattern32(0x50),
+        .mac_key = makePattern32(0x70),
+    };
+
+    const actual = try serializeSignalMessage(allocator, &msg);
+    defer allocator.free(actual);
+
+    const expected = try serializeSignalMessageLegacy(allocator, &msg);
+    defer allocator.free(expected);
+
+    try std.testing.expectEqualSlices(u8, expected, actual);
+
+    const parsed = try parseSignalMessage(actual);
+    try std.testing.expectEqual(msg.counter, parsed.counter);
+    try std.testing.expectEqual(msg.previous_counter, parsed.previous_counter);
+    try std.testing.expectEqualSlices(u8, &msg.ratchet_key, &parsed.ratchet_key);
+    try std.testing.expectEqualSlices(u8, msg.ciphertext, parsed.ciphertext);
+}
+
+test "serializePreKeySignalMessage matches legacy bytes" {
+    const allocator = std.testing.allocator;
+
+    var inner_signal: [140]u8 = undefined;
+    for (&inner_signal, 0..) |*byte, i| byte.* = @intCast((i * 3 + 7) & 0xFF);
+
+    const actual = try serializePreKeySignalMessage(
+        allocator,
+        300,
+        16384,
+        65535,
+        makePattern32(0x22),
+        makePattern32(0x44),
+        &inner_signal,
+    );
+    defer allocator.free(actual);
+
+    const expected = try serializePreKeySignalMessageLegacy(
+        allocator,
+        300,
+        16384,
+        65535,
+        makePattern32(0x22),
+        makePattern32(0x44),
+        &inner_signal,
+    );
+    defer allocator.free(expected);
+
+    try std.testing.expectEqualSlices(u8, expected, actual);
+
+    const parsed = try parsePreKeySignalMessage(actual);
+    try std.testing.expectEqual(@as(u32, 300), parsed.registration_id);
+    try std.testing.expectEqual(@as(?u32, 16384), parsed.prekey_id);
+    try std.testing.expectEqual(@as(u32, 65535), parsed.signed_prekey_id);
+    try std.testing.expectEqualSlices(u8, &makePattern32(0x22), &parsed.base_key);
+    try std.testing.expectEqualSlices(u8, &makePattern32(0x44), &parsed.identity_key);
+    try std.testing.expectEqualSlices(u8, &inner_signal, parsed.signal_message);
+}
+
+fn makePattern32(start: u8) [32]u8 {
+    var out: [32]u8 = undefined;
+    for (&out, 0..) |*byte, i| byte.* = start +% @as(u8, @intCast(i));
+    return out;
+}
+
+fn serializeSignalMessageLegacy(
+    allocator: std.mem.Allocator,
+    msg: *const session_mod.EncryptedMessage,
+) ![]u8 {
+    var proto = std.ArrayList(u8).empty;
+    defer proto.deinit(allocator);
+
+    try proto.append(allocator, 0x0A);
+    try proto.append(allocator, 33);
+    try proto.append(allocator, CURVE25519_KEY_TYPE_PREFIX);
+    try proto.appendSlice(allocator, &msg.ratchet_key);
+
+    try proto.append(allocator, 0x10);
+    try appendVarint(&proto, allocator, msg.counter);
+
+    try proto.append(allocator, 0x18);
+    try appendVarint(&proto, allocator, msg.previous_counter);
+
+    try proto.append(allocator, 0x22);
+    try appendVarint(&proto, allocator, @intCast(msg.ciphertext.len));
+    try proto.appendSlice(allocator, msg.ciphertext);
+
+    const msg_without_mac = try allocator.alloc(u8, 1 + proto.items.len);
+    defer allocator.free(msg_without_mac);
+    msg_without_mac[0] = VERSION_BYTE;
+    @memcpy(msg_without_mac[1..], proto.items);
+
+    const mac = msg.computeMac(msg_without_mac);
+
+    const result = try allocator.alloc(u8, msg_without_mac.len + MAC_LENGTH);
+    @memcpy(result[0..msg_without_mac.len], msg_without_mac);
+    @memcpy(result[msg_without_mac.len..], &mac);
+    return result;
+}
+
+fn serializePreKeySignalMessageLegacy(
+    allocator: std.mem.Allocator,
+    registration_id: u32,
+    prekey_id: ?u32,
+    signed_prekey_id: u32,
+    base_key: [32]u8,
+    identity_key: [32]u8,
+    signal_message: []const u8,
+) ![]u8 {
+    var proto = std.ArrayList(u8).empty;
+    defer proto.deinit(allocator);
+
+    try proto.append(allocator, 0x28);
+    try appendVarint(&proto, allocator, registration_id);
+
+    if (prekey_id) |pk_id| {
+        try proto.append(allocator, 0x08);
+        try appendVarint(&proto, allocator, pk_id);
+    }
+
+    try proto.append(allocator, 0x30);
+    try appendVarint(&proto, allocator, signed_prekey_id);
+
+    try proto.append(allocator, 0x12);
+    try proto.append(allocator, 33);
+    try proto.append(allocator, CURVE25519_KEY_TYPE_PREFIX);
+    try proto.appendSlice(allocator, &base_key);
+
+    try proto.append(allocator, 0x1A);
+    try proto.append(allocator, 33);
+    try proto.append(allocator, CURVE25519_KEY_TYPE_PREFIX);
+    try proto.appendSlice(allocator, &identity_key);
+
+    try proto.append(allocator, 0x22);
+    try appendVarint(&proto, allocator, @intCast(signal_message.len));
+    try proto.appendSlice(allocator, signal_message);
+
+    const result = try allocator.alloc(u8, 1 + proto.items.len);
+    result[0] = VERSION_BYTE;
+    @memcpy(result[1..], proto.items);
+    return result;
 }

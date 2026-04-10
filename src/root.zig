@@ -20,6 +20,8 @@ test {
     _ = @import("xed25519");
     _ = @import("framing");
     _ = @import("binary");
+    _ = @import("binary_tests.zig");
+    _ = @import("client_tests.zig");
     _ = @import("signal");
     _ = @import("addressing");
     _ = @import("usync");
