@@ -3,14 +3,13 @@ const binary = @import("binary");
 const ackable_tags = .{ "message", "receipt", "notification", "call" };
 
 /// Determine if a node should be acknowledged with <ack/>.
-/// Matches Rust: message, receipt, notification, call — must have id + from.
 pub fn shouldAck(node: *const binary.Node) bool {
     return matchesAnyTag(node.tag, ackable_tags) and
         node.getAttribute("id") != null and
         node.getAttribute("from") != null;
 }
 
-/// Build an <ack> node for the given stanza. Matches Rust build_ack_node logic.
+/// Build an <ack> node for the given stanza.
 pub fn buildAckNode(allocator: std.mem.Allocator, node: *const binary.Node) !binary.Node {
     var ack = binary.Node.initBorrowed(allocator, "ack");
     errdefer ack.deinit();

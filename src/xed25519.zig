@@ -18,7 +18,7 @@ pub const XEd25519 = struct {
         /// Generate a new XEd25519 key pair
         pub fn generate(io: std.Io) KeyPair {
             // Noise only needs a plain X25519 keypair; generate it directly to
-            // match WA Web / whatsapp-rust. Keep an Ed25519 keypair around only
+            // match WA Web. Keep an Ed25519 keypair around only
             // for the rare signing helpers and tests in this module.
             const x25519_keypair = crypto.dh.X25519.KeyPair.generate(io);
             const ed25519_keypair = crypto.sign.Ed25519.KeyPair.generate(io);

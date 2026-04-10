@@ -88,7 +88,6 @@ pub const PairCryptoResult = struct {
 };
 
 /// Build the cryptographic payload for <pair-device-sign>.
-/// This mirrors the Rust reference implementation's pair-success path.
 pub fn doPairCrypto(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -96,7 +95,7 @@ pub fn doPairCrypto(
     adv_secret_key: [32]u8,
     device_identity_bytes: []const u8,
 ) !PairCryptoResult {
-    _ = adv_secret_key; // HMAC verification is intentionally skipped for now, matching Rust.
+    _ = adv_secret_key; // HMAC verification is intentionally skipped for now
 
     var hmac_reader: std.Io.Reader = .fixed(device_identity_bytes);
     var hmac_container = try whatsapp.ADVSignedDeviceIdentityHMAC.decode(&hmac_reader, allocator);

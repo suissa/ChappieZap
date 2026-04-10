@@ -43,7 +43,6 @@ pub const Session = struct {
         local_reg_id: u32,
         remote_reg_id: u32,
     ) !Session {
-        // Rust/libsignal uses a fresh sending ratchet key here, not the X3DH base key.
         const dh = try our_ratchet_key.dh(their_ratchet_key);
         const step = x3dh_result.root_key.ratchetStep(dh);
 
@@ -77,7 +76,7 @@ pub const Session = struct {
             .local_identity_public = our_identity_public,
             .remote_identity_public = their_identity_public,
             .root_key = x3dh_result.root_key,
-            // Rust/libsignal initializes Bob with a sender chain keyed off the
+            // Libsignal initializes Bob with a sender chain keyed off the
             // signed prekey ratchet state and creates the first receiver chain
             // only when Alice's initial sender ratchet key arrives.
             .sending_chain = x3dh_result.chain_key,

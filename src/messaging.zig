@@ -37,7 +37,6 @@ pub fn buildFetchPrekeysIq(allocator: std.mem.Allocator, iq_id: []const u8, jids
 }
 
 /// Build a direct-message fanout stanza with one participant.
-/// Matches the Rust DM send shape more closely than a bare top-level <enc/>.
 /// <message to="..." id="..." type="text">
 ///   <participants>
 ///     <to jid="..."><enc type="pkmsg|msg" v="2">ciphertext</enc></to>
@@ -242,7 +241,6 @@ pub fn encodeTextMessageWithContextInto(
 }
 
 /// Wrap a text message in DeviceSentMessage for self-chat / own-device sync.
-/// Rust uses this wrapper for messages routed to our own other devices.
 pub fn encodeDeviceSentTextMessage(
     allocator: std.mem.Allocator,
     destination_jid: []const u8,
@@ -335,7 +333,6 @@ pub fn buildReportingNode(
 
 /// Decode protobuf Message and extract text content.
 /// Handles DeviceSentMessage unwrapping (companion device messages)
-/// and ExtendedTextMessage. Matches Rust's text_content() + unwrap_device_sent().
 pub fn decodeTextMessage(data: []const u8) ?[]const u8 {
     // Unwrap DeviceSentMessage (field 31) → inner Message (field 2)
     if (pbFindField(data, 31)) |dsm_bytes| {

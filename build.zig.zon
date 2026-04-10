@@ -1,9 +1,9 @@
 .{
-    .name = .zigwhats,
+    .name = .whatszig,
 
     .version = "0.0.0",
 
-    .fingerprint = 0x2d47bab584678687,
+    .fingerprint = 0xf311197367a93c9b,
 
     .minimum_zig_version = "0.16.0",
 
