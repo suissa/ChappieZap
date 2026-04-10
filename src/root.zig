@@ -2,6 +2,8 @@ pub const Client = @import("client").Client;
 pub const ClientOptions = @import("client").ClientOptions;
 pub const Event = @import("events").Event;
 pub const EventHandler = @import("events").EventHandler;
+pub const AddressBook = @import("addressing").AddressBook;
+pub const usync = @import("usync");
 pub const NoiseSocket = @import("socket").NoiseSocket;
 pub const NoiseCipher = @import("socket").NoiseCipher;
 pub const Noise = @import("noise").Noise;
@@ -19,4 +21,6 @@ test {
     _ = @import("framing");
     _ = @import("binary");
     _ = @import("signal");
+    _ = @import("addressing");
+    _ = @import("usync");
 }

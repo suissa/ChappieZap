@@ -136,6 +136,22 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const addressing_mod = b.addModule("addressing", .{
+        .root_source_file = b.path("src/addressing.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "binary", .module = binary_mod },
+        },
+    });
+
+    const usync_mod = b.addModule("usync", .{
+        .root_source_file = b.path("src/usync.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "binary", .module = binary_mod },
+        },
+    });
+
     const client_mod = b.addModule("client", .{
         .root_source_file = b.path("src/client.zig"),
         .target = target,
@@ -152,6 +168,8 @@ pub fn build(b: *std.Build) void {
             .{ .name = "pair", .module = pair_mod },
             .{ .name = "whatsapp_proto", .module = wa_proto_mod },
             .{ .name = "events", .module = events_mod },
+            .{ .name = "addressing", .module = addressing_mod },
+            .{ .name = "usync", .module = usync_mod },
             .{ .name = "log", .module = log_mod },
         },
     });
@@ -173,6 +191,8 @@ pub fn build(b: *std.Build) void {
             .{ .name = "protobuf", .module = protobuf_mod },
             .{ .name = "signal", .module = signal_mod },
             .{ .name = "events", .module = events_mod },
+            .{ .name = "addressing", .module = addressing_mod },
+            .{ .name = "usync", .module = usync_mod },
             .{ .name = "log", .module = log_mod },
         },
     });

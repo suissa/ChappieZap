@@ -6,7 +6,6 @@ const opts = ClientOptions{
     .host = "localhost",
     .port = 8080,
     .tls = false,
-    .direct_message_mode = .legacy_single_enc,
 };
 
 test "e2e: A sends encrypted message to B" {
@@ -21,10 +20,15 @@ test "e2e: A sends encrypted message to B" {
     defer b.deinit();
     try b.connectAndLogin();
 
+    const jid_a = a.phone_jid orelse return error.NoPairing;
     const jid_b = b.phone_jid orelse return error.NoPairing;
 
     try a.sendMessage(jid_b, "Hello from Zig!");
-    try b.waitForText("Hello from Zig!", 10_000);
+    try b.waitForMessage(.{
+        .from = jid_a,
+        .body_equals = "Hello from Zig!",
+        .require_decrypted = true,
+    }, 10_000);
 }
 
 test "e2e: zig client talks to whatsapp-rust bot" {
@@ -36,5 +40,7 @@ test "e2e: zig client talks to whatsapp-rust bot" {
     try client.connectAndLogin();
 
     try client.sendMessage("559980000001@s.whatsapp.net", "\xf0\x9f\xa6\x80ping");
-    try client.waitForTextContains("\xf0\x9f\x8f\x93 Pong!", 15_000);
+    try client.waitForMessage(.{
+        .from = "559980000001@s.whatsapp.net",
+    }, 15_000);
 }

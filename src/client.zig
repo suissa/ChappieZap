@@ -11,6 +11,8 @@ const messaging = @import("messaging");
 const pair_mod = @import("pair");
 const whatsapp = @import("whatsapp_proto");
 const events = @import("events");
+const addressing = @import("addressing");
+const usync = @import("usync");
 const log = @import("log");
 const http = std.http;
 
@@ -18,17 +20,11 @@ pub const Event = events.Event;
 pub const EventHandler = events.EventHandler;
 
 pub const ClientOptions = struct {
-    pub const DirectMessageMode = enum {
-        wa_web_fanout,
-        legacy_single_enc,
-    };
-
     host: []const u8 = "web.whatsapp.com",
     port: u16 = 443,
     tls: bool = true,
     tls_ca_cert_path: ?[]const u8 = null,
     path: []const u8 = "/ws/chat",
-    direct_message_mode: DirectMessageMode = .wa_web_fanout,
     on_event: ?EventHandler = null,
     event_context: ?*anyopaque = null,
 };
@@ -42,6 +38,7 @@ pub const Client = struct {
     static_keypair: xed25519.XEd25519.KeyPair,
     iq_counter: u32 = 0,
     is_logged_in: bool = false,
+    address_book: addressing.AddressBook,
     lid: ?[]u8 = null,
     phone_jid: ?[]u8 = null, // "559980000001@s.whatsapp.net"
     device_id: u32 = 0, // companion device ID from pairing (e.g. 33)
@@ -53,19 +50,18 @@ pub const Client = struct {
     adv_secret_key: [32]u8,
     app_version: AppVersion = .{},
     account_device_identity: ?[]u8 = null,
-    own_device_jids: std.ArrayList([]u8) = .empty,
-    sessions: std.ArrayList(SessionEntry) = .empty,
+    sessions: std.StringHashMap(signal.Session),
+    _last_msg_from: ?[]u8 = null,
+    _last_msg_chat: ?[]u8 = null,
+    _last_msg_id: ?[]u8 = null,
     _last_msg_text: ?[]u8 = null,
+    _last_msg_decrypted: bool = false,
+    _last_receipt_from: ?[]u8 = null,
 
     const AppVersion = struct {
         primary: u32 = 2,
         secondary: u32 = 3000,
         tertiary: u32 = 1037005288,
-    };
-
-    const SessionEntry = struct {
-        jid: []u8,
-        session: signal.Session,
     };
 
     /// Parameters for the PreKeySignalMessage wrapper.
@@ -74,6 +70,42 @@ pub const Client = struct {
         prekey_id: ?u32,
         signed_prekey_id: u32,
         base_key: [32]u8,
+    };
+
+    pub const MessageWait = struct {
+        from: ?[]const u8 = null,
+        chat: ?[]const u8 = null,
+        id: ?[]const u8 = null,
+        body_equals: ?[]const u8 = null,
+        body_contains: ?[]const u8 = null,
+        require_decrypted: ?bool = null,
+
+        fn matches(self: MessageWait, client: *const Client) bool {
+            if (self.from) |expected| {
+                const actual = client._last_msg_from orelse return false;
+                if (!std.mem.eql(u8, actual, expected)) return false;
+            }
+            if (self.chat) |expected| {
+                const actual = client._last_msg_chat orelse return false;
+                if (!std.mem.eql(u8, actual, expected)) return false;
+            }
+            if (self.id) |expected| {
+                const actual = client._last_msg_id orelse return false;
+                if (!std.mem.eql(u8, actual, expected)) return false;
+            }
+            if (self.body_equals) |expected| {
+                const actual = client._last_msg_text orelse return false;
+                if (!std.mem.eql(u8, actual, expected)) return false;
+            }
+            if (self.body_contains) |expected| {
+                const actual = client._last_msg_text orelse return false;
+                if (std.mem.indexOf(u8, actual, expected) == null) return false;
+            }
+            if (self.require_decrypted) |expected| {
+                if (client._last_msg_decrypted != expected) return false;
+            }
+            return true;
+        }
     };
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, options: ClientOptions) !Client {
@@ -90,27 +122,31 @@ pub const Client = struct {
             .io = io,
             .options = options,
             .ws_client = try ws.WebSocketClient.init(allocator, io),
+            .address_book = addressing.AddressBook.init(allocator),
             .static_keypair = xed25519.XEd25519.KeyPair.generate(io),
             .identity = identity,
             .signed_prekey = signed_pk,
             .prekeys = prekeys,
             .registration_id = signal.keys.generateRegistrationId(io),
             .adv_secret_key = adv_secret,
+            .sessions = std.StringHashMap(signal.Session).init(allocator),
         };
     }
 
     pub fn deinit(self: *Client) void {
+        if (self._last_receipt_from) |from| self.allocator.free(from);
+        if (self._last_msg_from) |from| self.allocator.free(from);
+        if (self._last_msg_chat) |chat| self.allocator.free(chat);
+        if (self._last_msg_id) |id| self.allocator.free(id);
         if (self._last_msg_text) |t| self.allocator.free(t);
         if (self.account_device_identity) |bytes| self.allocator.free(bytes);
-        for (self.own_device_jids.items) |jid| self.allocator.free(jid);
-        self.own_device_jids.deinit(self.allocator);
-        for (self.sessions.items) |*entry| {
-            self.allocator.free(entry.jid);
-            entry.session.deinit();
+        var sessions_it = self.sessions.iterator();
+        while (sessions_it.next()) |entry| {
+            entry.value_ptr.deinit();
+            self.allocator.free(entry.key_ptr.*);
         }
-        self.sessions.deinit(self.allocator);
-        if (self.lid) |lid| self.allocator.free(lid);
-        if (self.phone_jid) |pj| self.allocator.free(pj);
+        self.sessions.deinit();
+        self.address_book.deinit();
         if (self.noise_socket) |*ns| ns.deinit();
         self.ws_client.deinit();
     }
@@ -150,58 +186,50 @@ pub const Client = struct {
     /// Send a text message to a JID. Handles session management automatically:
     /// fetches prekeys and establishes a session if needed, then encrypts and sends.
     pub fn sendMessage(self: *Client, to_jid: []const u8, text: []const u8) !void {
-        if (self.isSelfChatJid(to_jid) and self.own_device_jids.items.len != 0) {
+        if (self.address_book.isSelfChatJid(to_jid) and self.address_book.ownDeviceCount() != 0) {
             return self.sendSelfChatFanout(to_jid, text);
         }
-        const encryption_jid = self.resolveEncryptionJid(to_jid);
-        if (self.findSession(encryption_jid) != null) {
-            return self.sendEncrypted(to_jid, encryption_jid, text, null);
-        }
-        // No session yet — fetch prekeys, create session, send as pkmsg
-        const bundle = try self.fetchPrekeys(encryption_jid);
-        const pk_params = try self.createSession(encryption_jid, bundle);
-        return self.sendEncrypted(to_jid, encryption_jid, text, pk_params);
+        return self.sendDirectMessageFanout(to_jid, text);
     }
 
     /// Wait for an incoming message containing the expected text.
     /// Reads and processes nodes until the text matches or timeout.
     pub fn waitForText(self: *Client, expected: []const u8, timeout_ms: u32) !void {
-        const start = std.Io.Clock.awake.now(self.io);
-        while (true) {
-            const elapsed_ms = start.durationTo(std.Io.Clock.awake.now(self.io)).toMilliseconds();
-            if (elapsed_ms >= timeout_ms) return error.TextNotFound;
-            const remaining_ms: u32 = @intCast(timeout_ms - elapsed_ms);
-
-            var node = self.receiveNodeTimeout(remaining_ms) catch |err| switch (err) {
-                error.Timeout => continue,
-                else => return err,
-            };
-            defer node.deinit();
-            self.processNode(&node);
-            if (self._last_msg_text) |text| {
-                if (std.mem.eql(u8, text, expected)) return;
-            }
-        }
+        return self.waitForMessage(.{ .body_equals = expected }, timeout_ms);
     }
 
     /// Wait for an incoming message whose decrypted body contains `expected`.
     pub fn waitForTextContains(self: *Client, expected: []const u8, timeout_ms: u32) !void {
-        const start = std.Io.Clock.awake.now(self.io);
-        while (true) {
-            const elapsed_ms = start.durationTo(std.Io.Clock.awake.now(self.io)).toMilliseconds();
-            if (elapsed_ms >= timeout_ms) return error.TextNotFound;
-            const remaining_ms: u32 = @intCast(timeout_ms - elapsed_ms);
+        return self.waitForMessage(.{ .body_contains = expected }, timeout_ms);
+    }
 
-            var node = self.receiveNodeTimeout(remaining_ms) catch |err| switch (err) {
-                error.Timeout => continue,
-                else => return err,
-            };
-            defer node.deinit();
-            self.processNode(&node);
-            if (self._last_msg_text) |text| {
-                if (std.mem.indexOf(u8, text, expected) != null) return;
+    /// Wait for any incoming message whose `from` attribute matches `expected_from`.
+    pub fn waitForMessageFrom(self: *Client, expected_from: []const u8, timeout_ms: u32) !void {
+        return self.waitForMessage(.{ .from = expected_from }, timeout_ms);
+    }
+
+    pub fn waitForMessage(self: *Client, expected: MessageWait, timeout_ms: u32) !void {
+        var state = expected;
+        return self.pumpUntil(timeout_ms, struct {
+            fn onNode(client: *Client, ctx: *MessageWait, node: *binary.Node) !PumpResult {
+                client.processNode(node);
+                if (ctx.matches(client)) return .done;
+                return .keep_going;
             }
-        }
+        }.onNode, &state, error.TextNotFound);
+    }
+
+    pub fn waitForReceiptFrom(self: *Client, expected_from: []const u8, timeout_ms: u32) !void {
+        const expected = expected_from;
+        return self.pumpUntil(timeout_ms, struct {
+            fn onNode(client: *Client, ctx: *[]const u8, node: *binary.Node) !PumpResult {
+                client.processNode(node);
+                if (client._last_receipt_from) |from| {
+                    if (std.mem.eql(u8, from, ctx.*)) return .done;
+                }
+                return .keep_going;
+            }
+        }.onNode, &expected, error.TextNotFound);
     }
 
     pub fn isConnected(self: *const Client) bool {
@@ -211,9 +239,9 @@ pub const Client = struct {
     fn decryptMessageNode(self: *Client, node: *const binary.Node) ?[]u8 {
         const children = node.getContentNodes() orelse return null;
         const from_jid = node.getAttribute("from") orelse return null;
-        const resolved = self.resolveIncomingEncryptionJid(node, from_jid);
-        defer if (resolved.owned) |jid| self.allocator.free(jid);
-        const encryption_jid = resolved.jid;
+        const resolved = self.address_book.resolveIncomingEncryptionJid(from_jid) catch return null;
+        defer resolved.deinit(self.allocator);
+        const encryption_jid = resolved.value;
 
         for (children) |*child| {
             if (!std.mem.eql(u8, child.tag, "enc")) continue;
@@ -391,48 +419,40 @@ pub const Client = struct {
     fn handlePairingFlow(self: *Client) !void {
         log.info("Client", "Waiting for pairing...", .{});
         var pair_sign_sent = false;
-        var count: usize = 0;
-        while (count < 30) : (count += 1) {
-            var node = try self.receiveNode();
-            defer node.deinit();
-            if (std.mem.eql(u8, node.tag, "failure")) {
-                logNode("Client/Pair", &node);
-                return error.ServerRejected;
-            }
+        return self.pumpUntil(30_000, struct {
+            fn onNode(client: *Client, pair_sent: *bool, node: *binary.Node) !PumpResult {
+                if (std.mem.eql(u8, node.tag, "failure")) return error.ServerRejected;
 
-            if (std.mem.eql(u8, node.tag, "stream:error")) {
-                // After pair-device-sign, any stream:error means "reconnect now"
-                // (515 is expected, but ping timeout also triggers reconnect)
-                if (pair_sign_sent) return;
-                for (node.attributes.items) |attr| {
-                    log.warn("Client/Pair", "  stream:error {s}={s}", .{ attr.key, attr.value });
+                if (std.mem.eql(u8, node.tag, "stream:error")) {
+                    if (pair_sent.*) return .done;
+                    return error.StreamError;
                 }
-                return error.StreamError;
-            }
 
-            if (std.mem.eql(u8, node.tag, "iq")) {
-                var handled = false;
-                if (node.getContentNodes()) |children| {
-                    for (children) |*child| {
-                        if (std.mem.eql(u8, child.tag, "pair-device")) {
-                            handled = true;
-                            self.emitQrCodes(child);
-                            self.sendIqResult(
-                                node.getAttribute("id"),
-                                node.getAttribute("from") orelse "s.whatsapp.net",
-                            );
-                        } else if (std.mem.eql(u8, child.tag, "pair-success")) {
-                            try self.handlePairSuccess(&node);
-                            pair_sign_sent = true;
+                if (std.mem.eql(u8, node.tag, "iq")) {
+                    var handled = false;
+                    if (node.getContentNodes()) |children| {
+                        for (children) |*child| {
+                            if (std.mem.eql(u8, child.tag, "pair-device")) {
+                                handled = true;
+                                client.emitQrCodes(child);
+                                client.sendIqResult(
+                                    node.getAttribute("id"),
+                                    node.getAttribute("from") orelse "s.whatsapp.net",
+                                );
+                            } else if (std.mem.eql(u8, child.tag, "pair-success")) {
+                                try client.handlePairSuccess(node);
+                                pair_sent.* = true;
+                            }
                         }
                     }
+                    if (!handled) client.processNode(node);
+                    return .keep_going;
                 }
-                if (!handled) self.processNode(&node);
-                continue;
+
+                client.processNode(node);
+                return .keep_going;
             }
-            self.processNode(&node);
-        }
-        return error.PairingTimeout;
+        }.onNode, &pair_sign_sent, error.PairingTimeout);
     }
 
     fn emitQrCodes(self: *Client, pair_device_node: *const binary.Node) void {
@@ -468,11 +488,8 @@ pub const Client = struct {
 
         // Extract device ID from raw JID: "559980000001:33@s.whatsapp.net" → 33
         self.device_id = extractDeviceId(info.phone_jid);
-
-        if (self.phone_jid) |old| self.allocator.free(old);
-        self.phone_jid = try stripDeviceFromJid(self.allocator, info.phone_jid);
-        if (self.lid) |old| self.allocator.free(old);
-        self.lid = try stripDeviceFromJid(self.allocator, info.lid_jid);
+        try self.address_book.setOwnIdentity(info.phone_jid, info.lid_jid, self.device_id);
+        self.syncIdentityAliases();
         log.info("Client/Pair", "Paired! phone={s} lid={s} device_id={d}", .{
             self.phone_jid orelse "?", self.lid orelse "?", self.device_id,
         });
@@ -510,40 +527,37 @@ pub const Client = struct {
     // --- Internal: Login ---
 
     fn readUntilLogin(self: *Client) !void {
-        // Use 10s timeout per read — if server doesn't send success within
-        // a reasonable time, we stop instead of hanging forever.
-        var count: usize = 0;
-        while (count < 30) : (count += 1) {
-            var node = self.receiveNodeTimeout(10_000) catch break;
-            defer node.deinit();
-
-            if (std.mem.eql(u8, node.tag, "success")) {
-                self.is_logged_in = true;
-                if (node.getAttribute("lid")) |lid| {
-                    if (self.lid) |old| self.allocator.free(old);
-                    self.lid = stripDeviceFromJid(self.allocator, lid) catch null;
+        var unit: void = {};
+        self.pumpUntil(30_000, struct {
+            fn onNode(client: *Client, _: *void, node: *binary.Node) !PumpResult {
+                if (std.mem.eql(u8, node.tag, "success")) {
+                    client.is_logged_in = true;
+                    if (node.getAttribute("lid")) |lid| {
+                        client.address_book.setOwnLid(lid) catch {};
+                        client.syncIdentityAliases();
+                    }
+                    return .done;
                 }
-                break;
-            }
 
-            if (std.mem.eql(u8, node.tag, "failure")) {
-                for (node.attributes.items) |attr| {
-                    log.err("Client", "  failure: {s}={s}", .{ attr.key, attr.value });
-                }
-                return error.LoginFailed;
-            }
+                if (std.mem.eql(u8, node.tag, "failure")) return error.LoginFailed;
 
-            self.processNode(&node);
-        }
-        if (!self.is_logged_in) {
+                client.processNode(node);
+                return .keep_going;
+            }
+        }.onNode, &unit, error.LoginFailed) catch |err| {
             self.emit(.login_failed);
-            return error.LoginFailed;
-        }
+            return err;
+        };
     }
 
     // --- Internal: Message Loop ---
 
     fn runMessageLoop(self: *Client) void {
+        var future = self.io.async(readLoopTask, .{self});
+        future.await(self.io);
+    }
+
+    fn readLoopTask(self: *Client) void {
         while (true) {
             var node = self.receiveNode() catch {
                 self.emit(.disconnected);
@@ -568,10 +582,21 @@ pub const Client = struct {
         }
 
         if (std.mem.eql(u8, tag, "notification")) {
-            self.maybeUpdateOwnDeviceList(node);
+            if (self.address_book.maybeUpdateOwnDeviceList(node) catch false) {
+                log.debug("Client/Devices", "Updated own device list from account_sync: {d} device(s)", .{
+                    self.address_book.ownDeviceCount(),
+                });
+                var it = self.address_book.ownDeviceIterator();
+                while (it.next()) |jid_ptr| {
+                    log.debug("Client/Devices", "  own device {s}", .{jid_ptr.*});
+                }
+            }
         }
 
         if (std.mem.eql(u8, tag, "message")) {
+            if (self.address_book.rememberFromMessage(node) catch null) |mapping| {
+                self.migrateSessionsOnLidDiscovery(mapping.pn_jid, mapping.lid_jid);
+            }
             const decrypted = self.decryptMessageNode(node);
             defer if (decrypted) |d| self.allocator.free(d);
 
@@ -579,8 +604,15 @@ pub const Client = struct {
             if (decrypted) |d| body = messaging.decodeTextMessage(d);
 
             // Store for waitForText
+            if (self._last_msg_from) |old| self.allocator.free(old);
+            self._last_msg_from = self.allocator.dupe(u8, node.getAttribute("from") orelse "") catch null;
+            if (self._last_msg_chat) |old| self.allocator.free(old);
+            self._last_msg_chat = self.allocator.dupe(u8, messageChatJid(self, node)) catch null;
+            if (self._last_msg_id) |old| self.allocator.free(old);
+            self._last_msg_id = self.allocator.dupe(u8, node.getAttribute("id") orelse "") catch null;
             if (self._last_msg_text) |old| self.allocator.free(old);
             self._last_msg_text = if (body) |b| self.allocator.dupe(u8, b) catch null else null;
+            self._last_msg_decrypted = body != null;
 
             self.emit(.{ .message = .{
                 .from = node.getAttribute("from") orelse "",
@@ -589,6 +621,11 @@ pub const Client = struct {
                 .node = node,
                 .body = body,
             } });
+        }
+
+        if (std.mem.eql(u8, tag, "receipt")) {
+            if (self._last_receipt_from) |old| self.allocator.free(old);
+            self._last_receipt_from = self.allocator.dupe(u8, node.getAttribute("from") orelse "") catch null;
         }
 
         if (node_handler.shouldAck(node)) {
@@ -608,7 +645,7 @@ pub const Client = struct {
         prekey_params: ?PreKeyMsgParams,
     ) !void {
         const session = self.findSession(encryption_jid) orelse return error.NoSession;
-        const plaintext = if (self.isSelfChatJid(chat_jid))
+        const plaintext = if (self.address_book.isSelfChatJid(chat_jid))
             try messaging.encodeDeviceSentTextMessage(self.allocator, chat_jid, text)
         else
             try messaging.encodeTextMessage(self.allocator, text);
@@ -635,25 +672,15 @@ pub const Client = struct {
         defer self.allocator.free(ciphertext);
 
         const msg_id_arr = messaging.generateMessageId(self.io);
-        var msg_node = switch (self.options.direct_message_mode) {
-            .wa_web_fanout => try messaging.buildMessageNode(
-                self.allocator,
-                chat_jid,
-                encryption_jid,
-                &msg_id_arr,
-                ciphertext,
-                prekey_params != null,
-                if (prekey_params != null) self.account_device_identity else null,
-            ),
-            .legacy_single_enc => try messaging.buildLegacyMessageNode(
-                self.allocator,
-                chat_jid,
-                &msg_id_arr,
-                ciphertext,
-                prekey_params != null,
-                if (prekey_params != null) self.account_device_identity else null,
-            ),
-        };
+        var msg_node = try messaging.buildMessageNode(
+            self.allocator,
+            chat_jid,
+            encryption_jid,
+            &msg_id_arr,
+            ciphertext,
+            prekey_params != null,
+            if (prekey_params != null) self.account_device_identity else null,
+        );
         defer msg_node.deinit();
         try self.sendNode(&msg_node);
     }
@@ -664,21 +691,29 @@ pub const Client = struct {
         var fetch_iq = try messaging.buildFetchPrekeysIq(self.allocator, iq_id, &.{jid});
         defer fetch_iq.deinit();
         try self.sendNode(&fetch_iq);
-
-        var attempts: usize = 0;
-        while (attempts < 20) : (attempts += 1) {
-            var node = try self.receiveNodeTimeout(5_000);
-            if (std.mem.eql(u8, node.tag, "iq")) {
-                const node_id = node.getAttribute("id") orelse "";
-                if (iqIdsMatch(node_id, iq_id)) {
-                    defer node.deinit();
-                    return parsePreKeyResponse(&node);
+        var result: ?prekey_mod.PreKeyBundle = null;
+        const WaitCtx = struct {
+            iq_id: []const u8,
+            result: *?prekey_mod.PreKeyBundle,
+        };
+        var wait_ctx = WaitCtx{
+            .iq_id = iq_id,
+            .result = &result,
+        };
+        try self.pumpUntil(100_000, struct {
+            fn onNode(client: *Client, ctx: *WaitCtx, node: *binary.Node) !PumpResult {
+                if (std.mem.eql(u8, node.tag, "iq")) {
+                    const node_id = node.getAttribute("id") orelse "";
+                    if (iqIdsMatch(node_id, ctx.iq_id)) {
+                        ctx.result.* = try parsePreKeyResponse(node);
+                        return .done;
+                    }
                 }
+                client.processNode(node);
+                return .keep_going;
             }
-            self.processNode(&node);
-            node.deinit();
-        }
-        return error.PreKeyFetchTimeout;
+        }.onNode, &wait_ctx, error.PreKeyFetchTimeout);
+        return result orelse error.PreKeyFetchTimeout;
     }
 
     const EncryptedPayload = struct {
@@ -726,9 +761,10 @@ pub const Client = struct {
         defer fanout_targets.deinit(self.allocator);
 
         try fanout_targets.append(self.allocator, chat_jid);
-        for (self.own_device_jids.items) |jid| {
-            if (std.mem.eql(u8, jid, chat_jid)) continue;
-            try fanout_targets.append(self.allocator, jid);
+        var own_devices_it = self.address_book.ownDeviceIterator();
+        while (own_devices_it.next()) |jid_ptr| {
+            if (std.mem.eql(u8, jid_ptr.*, chat_jid)) continue;
+            try fanout_targets.append(self.allocator, jid_ptr.*);
         }
 
         var participants = std.ArrayList(messaging.DirectParticipant).empty;
@@ -743,10 +779,11 @@ pub const Client = struct {
             fanout_targets.items.len,
         });
         for (fanout_targets.items) |participant_jid| {
-            if (self.isCurrentDeviceJid(participant_jid)) continue;
+            if (self.address_book.isCurrentDeviceJid(participant_jid)) continue;
 
-            const encryption_jid = try self.resolveDeviceEncryptionJid(participant_jid);
-            defer if (!std.mem.eql(u8, encryption_jid, participant_jid)) self.allocator.free(encryption_jid);
+            const resolved = try self.address_book.resolveOwnDeviceEncryptionJid(participant_jid);
+            defer resolved.deinit(self.allocator);
+            const encryption_jid = resolved.value;
 
             const had_session = self.findSession(encryption_jid) != null;
             const payload = try self.encryptPayloadForFanoutTarget(
@@ -770,8 +807,9 @@ pub const Client = struct {
         }
 
         if (participants.items.len == 0) {
-            const encryption_jid = self.resolveEncryptionJid(chat_jid);
-            return self.sendEncrypted(chat_jid, encryption_jid, text, null);
+            const resolved = try self.address_book.resolveEncryptionJid(chat_jid);
+            defer resolved.deinit(self.allocator);
+            return self.sendEncrypted(chat_jid, resolved.value, text, null);
         }
 
         const msg_id_arr = messaging.generateMessageId(self.io);
@@ -783,6 +821,113 @@ pub const Client = struct {
             if (any_prekey) self.account_device_identity else null,
         );
         defer msg_node.deinit();
+        try self.sendNode(&msg_node);
+    }
+
+    fn sendDirectMessageFanout(self: *Client, chat_jid: []const u8, text: []const u8) !void {
+        try self.ensureRecipientLidMapping(chat_jid);
+
+        const msg_id_arr = messaging.generateMessageId(self.io);
+        const reporting = try messaging.generateReportingContextForText(
+            self.allocator,
+            self.io,
+            text,
+            &msg_id_arr,
+            chat_jid,
+            chat_jid,
+        );
+
+        const recipient_plaintext = try messaging.encodeTextMessageWithContext(self.allocator, text, &reporting);
+        defer self.allocator.free(recipient_plaintext);
+
+        const own_plaintext = try messaging.encodeDeviceSentTextMessageWithContext(self.allocator, chat_jid, text, &reporting);
+        defer self.allocator.free(own_plaintext);
+
+        var recipient_targets = std.ArrayList([]const u8).empty;
+        defer recipient_targets.deinit(self.allocator);
+        var own_targets = std.ArrayList([]const u8).empty;
+        defer own_targets.deinit(self.allocator);
+
+        const resolved_recipient = try self.address_book.resolveEncryptionJid(chat_jid);
+        defer resolved_recipient.deinit(self.allocator);
+        const recipient_bare = try self.bareJid(resolved_recipient.value);
+        defer self.allocator.free(recipient_bare);
+        try recipient_targets.append(self.allocator, recipient_bare);
+
+        if (self.address_book.phoneJid()) |own_phone| {
+            try own_targets.append(self.allocator, own_phone);
+        }
+        var own_it = self.address_book.ownDeviceIterator();
+        while (own_it.next()) |jid_ptr| {
+            if (std.mem.eql(u8, jid_ptr.*, chat_jid)) continue;
+            if (self.address_book.isCurrentDeviceJid(jid_ptr.*)) continue;
+            if (containsJid(own_targets.items, jid_ptr.*)) continue;
+            try own_targets.append(self.allocator, jid_ptr.*);
+        }
+
+        var participants = std.ArrayList(messaging.DirectParticipant).empty;
+        defer {
+            for (participants.items) |participant| self.allocator.free(participant.ciphertext);
+            participants.deinit(self.allocator);
+        }
+
+        var any_prekey = false;
+
+        for (recipient_targets.items) |participant_jid| {
+            const resolved = try self.address_book.resolveEncryptionJid(participant_jid);
+            defer resolved.deinit(self.allocator);
+            const encryption_jid = resolved.value;
+            const had_session = self.findSession(encryption_jid) != null;
+            const payload = try self.encryptPayloadForFanoutTarget(
+                participant_jid,
+                encryption_jid,
+                recipient_plaintext,
+                had_session,
+            );
+            errdefer self.allocator.free(payload.ciphertext);
+            any_prekey = any_prekey or payload.is_prekey;
+            try participants.append(self.allocator, .{
+                .jid = participant_jid,
+                .ciphertext = payload.ciphertext,
+                .is_prekey = payload.is_prekey,
+            });
+        }
+
+        for (own_targets.items) |participant_jid| {
+            if (self.address_book.isCurrentDeviceJid(participant_jid)) continue;
+            const resolved = try self.address_book.resolveOwnDeviceEncryptionJid(participant_jid);
+            defer resolved.deinit(self.allocator);
+            const encryption_jid = resolved.value;
+            const had_session = self.findSession(encryption_jid) != null;
+            const payload = try self.encryptPayloadForFanoutTarget(
+                participant_jid,
+                encryption_jid,
+                own_plaintext,
+                had_session,
+            );
+            errdefer self.allocator.free(payload.ciphertext);
+            any_prekey = any_prekey or payload.is_prekey;
+            try participants.append(self.allocator, .{
+                .jid = participant_jid,
+                .ciphertext = payload.ciphertext,
+                .is_prekey = payload.is_prekey,
+            });
+        }
+
+        if (participants.items.len == 0) return error.NoRecipients;
+
+        var msg_node = try messaging.buildFanoutMessageNode(
+            self.allocator,
+            chat_jid,
+            &msg_id_arr,
+            participants.items,
+            if (any_prekey) self.account_device_identity else null,
+        );
+        defer msg_node.deinit();
+
+        var reporting_node = try messaging.buildReportingNode(self.allocator, &reporting);
+        try msg_node.addChild(&reporting_node);
+
         try self.sendNode(&msg_node);
     }
 
@@ -925,134 +1070,22 @@ pub const Client = struct {
     }
 
     fn findSession(self: *Client, jid: []const u8) ?*signal.Session {
-        for (self.sessions.items) |*entry| {
-            if (std.mem.eql(u8, entry.jid, jid)) return &entry.session;
-        }
-        return null;
+        return self.sessions.getPtr(jid);
     }
 
     fn hasSession(self: *const Client, jid: []const u8) bool {
-        for (self.sessions.items) |entry| {
-            if (std.mem.eql(u8, entry.jid, jid)) return true;
-        }
-        return false;
+        return self.sessions.contains(jid);
     }
 
     fn storeSession(self: *Client, jid: []const u8, session: signal.Session) !void {
-        for (self.sessions.items) |*entry| {
-            if (std.mem.eql(u8, entry.jid, jid)) {
-                entry.session.deinit();
-                entry.session = session;
-                return;
-            }
+        const gop = try self.sessions.getOrPut(jid);
+        if (gop.found_existing) {
+            gop.value_ptr.deinit();
+        } else {
+            gop.key_ptr.* = try self.allocator.dupe(u8, jid);
+            errdefer self.sessions.removeByPtr(gop.key_ptr);
         }
-        const jid_owned = try self.allocator.dupe(u8, jid);
-        try self.sessions.append(self.allocator, .{ .jid = jid_owned, .session = session });
-    }
-
-    fn isSelfChatJid(self: *const Client, jid: []const u8) bool {
-        if (self.lid) |own_lid| if (jidMatchesUserServer(jid, own_lid)) return true;
-        if (self.phone_jid) |own_pn| if (jidMatchesUserServer(jid, own_pn)) return true;
-        return false;
-    }
-
-    fn isCurrentDeviceJid(self: *const Client, jid: []const u8) bool {
-        if (self.phone_jid) |phone_jid| {
-            var buf: [96]u8 = undefined;
-            if (std.mem.indexOfScalar(u8, phone_jid, '@')) |at| {
-                const current = std.fmt.bufPrint(&buf, "{s}:{d}{s}", .{
-                    phone_jid[0..at],
-                    self.device_id,
-                    phone_jid[at..],
-                }) catch return false;
-                return std.mem.eql(u8, jid, current);
-            }
-        }
-        return false;
-    }
-
-    fn resolveEncryptionJid(self: *const Client, chat_jid: []const u8) []const u8 {
-        if (self.isSelfChatJid(chat_jid)) {
-            if (self.lid) |own_lid| return own_lid;
-        }
-        return chat_jid;
-    }
-
-    fn resolveDeviceEncryptionJid(self: *const Client, participant_jid: []const u8) ![]const u8 {
-        if (self.phone_jid) |phone_jid| {
-            if (jidMatchesUserServer(participant_jid, phone_jid)) {
-                if (self.lid) |own_lid| {
-                    return withDeviceFromJid(self.allocator, own_lid, participant_jid);
-                }
-            }
-        }
-        return self.allocator.dupe(u8, participant_jid);
-    }
-
-    fn maybeUpdateOwnDeviceList(self: *Client, node: *const binary.Node) void {
-        const ntype = node.getAttribute("type") orelse return;
-        if (!std.mem.eql(u8, ntype, "account_sync")) return;
-        const from = node.getAttribute("from") orelse return;
-        if (!self.isSelfChatJid(from)) return;
-
-        const children = node.getContentNodes() orelse return;
-        for (children) |*child| {
-            if (!std.mem.eql(u8, child.tag, "devices")) continue;
-            const device_children = child.getContentNodes() orelse return;
-
-            for (self.own_device_jids.items) |jid| self.allocator.free(jid);
-            self.own_device_jids.clearRetainingCapacity();
-
-            for (device_children) |*device_node| {
-                if (!std.mem.eql(u8, device_node.tag, "device")) continue;
-                const jid = device_node.getAttribute("jid") orelse continue;
-                const duped = self.allocator.dupe(u8, jid) catch continue;
-                self.own_device_jids.append(self.allocator, duped) catch {
-                    self.allocator.free(duped);
-                    continue;
-                };
-            }
-            log.debug("Client/Devices", "Updated own device list from account_sync: {d} device(s)", .{
-                self.own_device_jids.items.len,
-            });
-            for (self.own_device_jids.items) |jid| {
-                log.debug("Client/Devices", "  own device {s}", .{jid});
-            }
-            return;
-        }
-    }
-
-    fn resolveIncomingEncryptionJid(
-        self: *const Client,
-        node: *const binary.Node,
-        from_jid: []const u8,
-    ) struct { jid: []const u8, owned: ?[]u8 = null } {
-        // For self-account PN messages, Rust resolves the sender to the corresponding
-        // LID for Signal session lookup. This is critical for self-sync/key-share
-        // messages that arrive from our PN but belong to the same LID identity.
-        if (self.phone_jid) |phone_jid| {
-            if (jidMatchesUserServer(from_jid, phone_jid)) {
-                if (self.lid) |own_lid| {
-                    const mapped = withDeviceFromJid(self.allocator, own_lid, from_jid) catch null;
-                    if (mapped) |jid| return .{ .jid = jid, .owned = jid };
-                }
-            }
-        }
-
-        // For PN-addressed messages from other users, prefer sender_lid when present.
-        if (std.mem.indexOfScalar(u8, from_jid, '@')) |at| {
-            if (std.mem.eql(u8, from_jid[at..], "@s.whatsapp.net")) {
-                if (node.getAttribute("sender_lid")) |sender_lid| {
-                    // Prefer whichever address already has a live session. Rust keeps
-                    // PN↔LID mappings and resolves dynamically; we emulate that here.
-                    if (self.hasSession(sender_lid)) return .{ .jid = sender_lid };
-                    if (self.hasSession(from_jid)) return .{ .jid = from_jid };
-                    return .{ .jid = sender_lid };
-                }
-            }
-        }
-
-        return .{ .jid = from_jid };
+        gop.value_ptr.* = session;
     }
 
     // --- Internal: Prekey Parsing ---
@@ -1082,11 +1115,157 @@ pub const Client = struct {
         }
     }
 
+    fn syncIdentityAliases(self: *Client) void {
+        self.phone_jid = if (self.address_book.phoneJid()) |jid| @constCast(jid) else null;
+        self.lid = if (self.address_book.lidJid()) |jid| @constCast(jid) else null;
+        self.device_id = self.address_book.deviceId();
+    }
+
+    fn migrateSessionsOnLidDiscovery(
+        self: *Client,
+        pn_jid: []const u8,
+        lid_jid: []const u8,
+    ) void {
+        const pn_parts = parseJidParts(pn_jid) orelse return;
+        if (!std.mem.eql(u8, pn_parts.server, "s.whatsapp.net")) return;
+
+        var moves = std.ArrayList(struct {
+            from: []const u8,
+            to: []u8,
+        }).empty;
+        defer {
+            for (moves.items) |move| self.allocator.free(move.to);
+            moves.deinit(self.allocator);
+        }
+
+        var it = self.sessions.iterator();
+        while (it.next()) |entry| {
+            const session_jid = entry.key_ptr.*;
+            const parts = parseJidParts(session_jid) orelse continue;
+            if (!std.mem.eql(u8, parts.server, "s.whatsapp.net")) continue;
+            if (!std.mem.eql(u8, parts.bare_user, pn_parts.bare_user)) continue;
+
+            const mapped = addressing.AddressBook.withDeviceFromJid(self.allocator, lid_jid, session_jid) catch continue;
+            moves.append(self.allocator, .{
+                .from = entry.key_ptr.*,
+                .to = mapped,
+            }) catch {
+                self.allocator.free(mapped);
+                return;
+            };
+        }
+
+        for (moves.items) |move| {
+            if (self.sessions.contains(move.to)) {
+                if (self.sessions.fetchRemove(move.from)) |kv| {
+                    var doomed = kv.value;
+                    doomed.deinit();
+                    self.allocator.free(kv.key);
+                }
+                continue;
+            }
+
+            const kv = self.sessions.fetchRemove(move.from) orelse continue;
+            self.storeSession(move.to, kv.value) catch {
+                self.storeSession(kv.key, kv.value) catch {
+                    var doomed = kv.value;
+                    doomed.deinit();
+                    self.allocator.free(kv.key);
+                };
+                self.allocator.free(kv.key);
+                continue;
+            };
+            self.allocator.free(kv.key);
+        }
+    }
+
+    fn bareJid(self: *Client, jid: []const u8) ![]u8 {
+        return addressing.AddressBook.stripDeviceFromJid(self.allocator, jid);
+    }
+
+    fn ensureRecipientLidMapping(self: *Client, chat_jid: []const u8) !void {
+        if (!isPnJid(chat_jid)) return;
+
+        const resolved = try self.address_book.resolveEncryptionJid(chat_jid);
+        defer resolved.deinit(self.allocator);
+        if (!std.mem.eql(u8, resolved.value, chat_jid)) return;
+
+        const bare = try self.bareJid(chat_jid);
+        defer self.allocator.free(bare);
+        try self.queryLidMappings(&.{bare});
+    }
+
+    fn queryLidMappings(self: *Client, jids: []const []const u8) !void {
+        const iq_id = try self.nextIqId();
+        defer self.allocator.free(iq_id);
+        var wait_iq_id = iq_id;
+
+        var iq = try usync.buildLidQueryIq(self.allocator, iq_id, iq_id, jids);
+        defer iq.deinit();
+        try self.sendNode(&iq);
+        return self.pumpUntil(100_000, struct {
+            fn onNode(client: *Client, ctx: *[]u8, node: *binary.Node) !PumpResult {
+                if (std.mem.eql(u8, node.tag, "iq")) {
+                    const node_id = node.getAttribute("id") orelse "";
+                    if (iqIdsMatch(node_id, ctx.*)) {
+                        const mappings = try usync.parseLidMappings(client.allocator, node);
+                        defer {
+                            for (mappings) |mapping| {
+                                client.allocator.free(mapping.pn_jid);
+                                client.allocator.free(mapping.lid_jid);
+                            }
+                            client.allocator.free(mappings);
+                        }
+                        for (mappings) |mapping| {
+                            if (try client.address_book.rememberMappingJids(mapping.pn_jid, mapping.lid_jid)) |learned| {
+                                client.migrateSessionsOnLidDiscovery(learned.pn_jid, learned.lid_jid);
+                            }
+                        }
+                        return .done;
+                    }
+                }
+                client.processNode(node);
+                return .keep_going;
+            }
+        }.onNode, &wait_iq_id, error.PreKeyFetchTimeout);
+    }
+
     fn sendActive(self: *Client) void {
         var active_node = binary.Node.init(self.allocator, "active") catch return;
         defer active_node.deinit();
         const id = self.sendIq("set", "passive", "s.whatsapp.net", &active_node) catch return;
         self.allocator.free(id);
+    }
+
+    const PumpResult = enum {
+        keep_going,
+        done,
+    };
+
+    fn pumpUntil(
+        self: *Client,
+        timeout_ms: u32,
+        on_node: anytype,
+        ctx: anytype,
+        timeout_err: anyerror,
+    ) !void {
+        const start = std.Io.Clock.awake.now(self.io);
+        while (true) {
+            const elapsed_ms = start.durationTo(std.Io.Clock.awake.now(self.io)).toMilliseconds();
+            if (elapsed_ms >= timeout_ms) return timeout_err;
+            const remaining_ms: u32 = @intCast(timeout_ms - elapsed_ms);
+
+            var node = self.receiveNodeTimeout(remaining_ms) catch |err| switch (err) {
+                error.Timeout => continue,
+                else => return err,
+            };
+            defer node.deinit();
+
+            switch (try on_node(self, ctx, &node)) {
+                .keep_going => {},
+                .done => return,
+            }
+        }
     }
 
     fn sendIqResult(self: *Client, id: ?[]const u8, to: []const u8) void {
@@ -1261,51 +1440,16 @@ fn extractDeviceId(jid: []const u8) u32 {
     return std.fmt.parseInt(u32, jid[colon + 1 .. at], 10) catch 0;
 }
 
-fn stripDeviceFromJid(allocator: std.mem.Allocator, jid: []const u8) ![]u8 {
-    if (std.mem.indexOf(u8, jid, ":")) |colon| {
-        if (std.mem.indexOf(u8, jid, "@")) |at| {
-            return std.fmt.allocPrint(allocator, "{s}{s}", .{ jid[0..colon], jid[at..] });
-        }
-    }
-    return allocator.dupe(u8, jid);
-}
-
-fn withDeviceFromJid(
-    allocator: std.mem.Allocator,
-    base_jid: []const u8,
-    device_source_jid: []const u8,
-) ![]u8 {
-    const base_at = std.mem.indexOfScalar(u8, base_jid, '@') orelse return allocator.dupe(u8, base_jid);
-    const source_at = std.mem.indexOfScalar(u8, device_source_jid, '@') orelse return allocator.dupe(u8, base_jid);
-    const source_user = device_source_jid[0..source_at];
-    const colon = std.mem.indexOfScalar(u8, source_user, ':') orelse return allocator.dupe(u8, base_jid);
-    return std.fmt.allocPrint(allocator, "{s}:{s}{s}", .{
-        base_jid[0..base_at],
-        source_user[colon + 1 ..],
-        base_jid[base_at..],
-    });
-}
-
 fn messageChatJid(self: *const Client, node: *const binary.Node) []const u8 {
     const from = node.getAttribute("from") orelse return "";
 
     // Self-sent device echoes should reply to the chat/recipient JID, not the
     // specific sending device JID.
-    if (self.isSelfChatJid(from)) {
+    if (self.address_book.isSelfChatJid(from)) {
         if (node.getAttribute("recipient")) |recipient| return recipient;
     }
 
     return from;
-}
-
-fn jidMatchesUserServer(a: []const u8, b: []const u8) bool {
-    const a_at = std.mem.indexOfScalar(u8, a, '@') orelse return false;
-    const b_at = std.mem.indexOfScalar(u8, b, '@') orelse return false;
-    if (!std.mem.eql(u8, a[a_at..], b[b_at..])) return false;
-
-    const a_user_end = std.mem.indexOfScalar(u8, a[0..a_at], ':') orelse a_at;
-    const b_user_end = std.mem.indexOfScalar(u8, b[0..b_at], ':') orelse b_at;
-    return std.mem.eql(u8, a[0..a_user_end], b[0..b_user_end]);
 }
 
 fn iqIdsMatch(actual: []const u8, expected: []const u8) bool {
@@ -1348,6 +1492,32 @@ fn allocHex(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
         _ = std.fmt.bufPrint(out[i * 2 ..][0..2], "{x:0>2}", .{b}) catch unreachable;
     }
     return out;
+}
+
+const ParsedJidParts = struct {
+    bare_user: []const u8,
+    server: []const u8,
+};
+
+fn parseJidParts(jid: []const u8) ?ParsedJidParts {
+    const at = std.mem.indexOfScalar(u8, jid, '@') orelse return null;
+    const user = jid[0..at];
+    return .{
+        .bare_user = if (std.mem.indexOfScalar(u8, user, ':')) |colon| user[0..colon] else user,
+        .server = jid[at + 1 ..],
+    };
+}
+
+fn containsJid(items: []const []const u8, needle: []const u8) bool {
+    for (items) |item| {
+        if (std.mem.eql(u8, item, needle)) return true;
+    }
+    return false;
+}
+
+fn isPnJid(jid: []const u8) bool {
+    const at = std.mem.indexOfScalar(u8, jid, '@') orelse return false;
+    return std.mem.eql(u8, jid[at + 1 ..], "s.whatsapp.net");
 }
 
 fn fetchLatestAppVersion(allocator: std.mem.Allocator, io: std.Io) !Client.AppVersion {
@@ -1504,8 +1674,8 @@ test "message chat jid uses recipient for self-sent device echoes" {
 
     var client = try Client.init(allocator, io, .{});
     defer client.deinit();
-    client.phone_jid = try allocator.dupe(u8, "559984726662@s.whatsapp.net");
-    client.lid = try allocator.dupe(u8, "236395184570386@lid");
+    try client.address_book.setOwnIdentity("559984726662@s.whatsapp.net", "236395184570386@lid", 63);
+    client.syncIdentityAliases();
 
     var node = try binary.Node.init(allocator, "message");
     defer node.deinit();
@@ -1526,16 +1696,16 @@ test "iqIdsMatch accepts whatsapp trailing F suffix" {
     try std.testing.expect(!iqIdsMatch("2X", "2"));
 }
 
-test "resolveDeviceEncryptionJid maps own pn device to lid device" {
+test "resolveOwnDeviceEncryptionJid maps own pn device to lid device" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
     var client = try Client.init(allocator, io, .{});
     defer client.deinit();
-    client.phone_jid = try allocator.dupe(u8, "559984726662@s.whatsapp.net");
-    client.lid = try allocator.dupe(u8, "236395184570386@lid");
+    try client.address_book.setOwnIdentity("559984726662@s.whatsapp.net", "236395184570386@lid", 63);
+    client.syncIdentityAliases();
 
-    const mapped = try client.resolveDeviceEncryptionJid("559984726662:4@s.whatsapp.net");
-    defer allocator.free(mapped);
-    try std.testing.expectEqualStrings("236395184570386:4@lid", mapped);
+    const resolved = try client.address_book.resolveOwnDeviceEncryptionJid("559984726662:4@s.whatsapp.net");
+    defer resolved.deinit(allocator);
+    try std.testing.expectEqualStrings("236395184570386:4@lid", resolved.value);
 }

@@ -292,7 +292,10 @@ pub fn encodeNode(node: *const Node, writer: *BinaryWriter) BinaryError!usize {
         const key_bytes = try writeString(attr.key, writer);
         total_bytes += key_bytes;
 
-        const value_bytes = try writeString(attr.value, writer);
+        const value_bytes = if (isJidAttributeKey(attr.key) and std.mem.indexOfScalar(u8, attr.value, '@') != null)
+            encodeJid(attr.value, writer) catch try writeString(attr.value, writer)
+        else
+            try writeString(attr.value, writer);
         total_bytes += value_bytes;
     }
 
@@ -553,9 +556,53 @@ pub const JID = struct {
 /// Encode a JID (WhatsApp identifier)
 /// JIDs have the format: user@server, agent.device@server, agent.device:integrator@server
 pub fn encodeJid(jid: []const u8, writer: *BinaryWriter) BinaryError!usize {
-    // For now, just encode as string
-    // In a full implementation, this would parse and encode JID components separately
-    return try encodeString(jid, writer);
+    const at_index = std.mem.indexOfScalar(u8, jid, '@') orelse return BinaryError.InvalidFormat;
+    const user_part = jid[0..at_index];
+    const server_part = jid[at_index + 1 ..];
+
+    var user = user_part;
+    var agent: u8 = 0;
+    var device: u16 = 0;
+    var integrator: u16 = 0;
+
+    if (std.mem.indexOfScalar(u8, user_part, ':')) |colon| {
+        user = user_part[0..colon];
+        const remainder = user_part[colon + 1 ..];
+        if (std.mem.indexOfScalar(u8, remainder, ':')) |second_colon| {
+            device = std.fmt.parseInt(u16, remainder[0..second_colon], 10) catch return BinaryError.InvalidFormat;
+            integrator = std.fmt.parseInt(u16, remainder[second_colon + 1 ..], 10) catch return BinaryError.InvalidFormat;
+        } else {
+            device = std.fmt.parseInt(u16, remainder, 10) catch return BinaryError.InvalidFormat;
+        }
+    } else if (std.mem.indexOfScalar(u8, user_part, '.')) |dot| {
+        agent = std.fmt.parseInt(u8, user_part[0..dot], 10) catch return BinaryError.InvalidFormat;
+        device = std.fmt.parseInt(u16, user_part[dot + 1 ..], 10) catch return BinaryError.InvalidFormat;
+        user = "";
+    }
+
+    const parsed = JID{
+        .user = user,
+        .server = server_part,
+        .agent = agent,
+        .device = device,
+        .integrator = integrator,
+        .allocator = undefined,
+    };
+    return encodeJidStruct(&parsed, writer);
+}
+
+fn isJidAttributeKey(key: []const u8) bool {
+    return std.mem.eql(u8, key, "to") or
+        std.mem.eql(u8, key, "from") or
+        std.mem.eql(u8, key, "jid") or
+        std.mem.eql(u8, key, "participant") or
+        std.mem.eql(u8, key, "recipient") or
+        std.mem.eql(u8, key, "sender_lid") or
+        std.mem.eql(u8, key, "participant_pn") or
+        std.mem.eql(u8, key, "participant_lid") or
+        std.mem.eql(u8, key, "peer_recipient_lid") or
+        std.mem.eql(u8, key, "peer_recipient_pn") or
+        std.mem.eql(u8, key, "pn_jid");
 }
 
 /// Decode a JID

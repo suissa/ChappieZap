@@ -4,7 +4,10 @@ const protobuf = @import("protobuf");
 const signal = @import("signal");
 const prekey_mod = @import("prekey");
 const whatsapp = @import("whatsapp_proto");
+const crypto = std.crypto;
 const fd = protobuf.fd;
+const HkdfSha256 = crypto.kdf.hkdf.HkdfSha256;
+const HmacSha256 = crypto.auth.hmac.sha2.HmacSha256;
 // Protobuf field numbers from wa.Message:
 // field 1  = conversation (string)
 // field 6  = extendedTextMessage (submessage) → field 1 = text
@@ -47,13 +50,39 @@ pub const DirectParticipant = struct {
     is_prekey: bool,
 };
 
+pub const ReportingContext = struct {
+    message_secret: [32]u8,
+    reporting_token: [16]u8,
+    version: i32 = 2,
+};
+
 const OutboundMessage = struct {
     conversation: ?[]const u8 = null,
     deviceSentMessage: ?OutboundDeviceSentMessage = null,
+    messageContextInfo: ?OutboundMessageContextInfo = null,
 
     pub const _desc_table = .{
         .conversation = fd(1, .{ .scalar = .string }),
         .deviceSentMessage = fd(31, .submessage),
+        .messageContextInfo = fd(35, .submessage),
+    };
+
+    pub fn encode(
+        self: @This(),
+        writer: *std.Io.Writer,
+        allocator: std.mem.Allocator,
+    ) (std.Io.Writer.Error || std.mem.Allocator.Error)!void {
+        return protobuf.encode(writer, allocator, self);
+    }
+};
+
+const OutboundMessageContextInfo = struct {
+    messageSecret: ?[]const u8 = null,
+    reportingTokenVersion: ?i32 = null,
+
+    pub const _desc_table = .{
+        .messageSecret = fd(3, .{ .scalar = .bytes }),
+        .reportingTokenVersion = fd(8, .{ .scalar = .int32 }),
     };
 
     pub fn encode(
@@ -152,40 +181,6 @@ pub fn buildMessageNode(
 /// Legacy mock-server compatible direct message shape:
 /// <message to="..." id="..." type="text"><enc .../></message>
 /// Optionally appends <device-identity/> for pkmsg.
-pub fn buildLegacyMessageNode(
-    allocator: std.mem.Allocator,
-    chat_jid: []const u8,
-    msg_id: []const u8,
-    ciphertext: []const u8,
-    is_prekey_msg: bool,
-    device_identity_bytes: ?[]const u8,
-) !binary.Node {
-    var msg = try binary.Node.init(allocator, "message");
-    errdefer msg.deinit();
-
-    try msg.addAttribute("to", chat_jid);
-    try msg.addAttribute("id", msg_id);
-    try msg.addAttribute("type", "text");
-
-    var enc_node = try binary.Node.init(allocator, "enc");
-    defer enc_node.deinit();
-    try enc_node.addAttribute("v", "2");
-    try enc_node.addAttribute("type", if (is_prekey_msg) "pkmsg" else "msg");
-    try enc_node.setContentBytes(ciphertext);
-    try msg.addChild(&enc_node);
-
-    if (is_prekey_msg) {
-        if (device_identity_bytes) |bytes| {
-            var device_identity = try binary.Node.init(allocator, "device-identity");
-            defer device_identity.deinit();
-            try device_identity.setContentBytes(bytes);
-            try msg.addChild(&device_identity);
-        }
-    }
-
-    return msg;
-}
-
 /// Generate a simple message ID (simplified version)
 pub fn generateMessageId(io: std.Io) [22]u8 {
     var random_bytes: [9]u8 = undefined;
@@ -208,11 +203,23 @@ pub fn generateMessageId(io: std.Io) [22]u8 {
 /// Encode a text message as protobuf (simplified — just the conversation field)
 /// This is a minimal Message protobuf with field 1 = conversation text
 pub fn encodeTextMessage(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    return encodeTextMessageWithContext(allocator, text, null);
+}
+
+pub fn encodeTextMessageWithContext(
+    allocator: std.mem.Allocator,
+    text: []const u8,
+    reporting: ?*const ReportingContext,
+) ![]u8 {
     var writer = std.Io.Writer.Allocating.init(allocator);
     defer writer.deinit();
 
     const msg = OutboundMessage{
         .conversation = text,
+        .messageContextInfo = if (reporting) |ctx| .{
+            .messageSecret = &ctx.message_secret,
+            .reportingTokenVersion = ctx.version,
+        } else null,
     };
     try msg.encode(&writer.writer, allocator);
     return writer.toOwnedSlice();
@@ -225,8 +232,21 @@ pub fn encodeDeviceSentTextMessage(
     destination_jid: []const u8,
     text: []const u8,
 ) ![]u8 {
+    return encodeDeviceSentTextMessageWithContext(allocator, destination_jid, text, null);
+}
+
+pub fn encodeDeviceSentTextMessageWithContext(
+    allocator: std.mem.Allocator,
+    destination_jid: []const u8,
+    text: []const u8,
+    reporting: ?*const ReportingContext,
+) ![]u8 {
     const inner = OutboundMessage{
         .conversation = text,
+        .messageContextInfo = if (reporting) |ctx| .{
+            .messageSecret = &ctx.message_secret,
+            .reportingTokenVersion = ctx.version,
+        } else null,
     };
     const outer = OutboundMessage{
         .deviceSentMessage = .{
@@ -240,6 +260,58 @@ pub fn encodeDeviceSentTextMessage(
     defer writer.deinit();
     try outer.encode(&writer.writer, allocator);
     return writer.toOwnedSlice();
+}
+
+pub fn generateReportingContextForText(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    text: []const u8,
+    stanza_id: []const u8,
+    sender_jid: []const u8,
+    remote_jid: []const u8,
+) !ReportingContext {
+    var message_secret: [32]u8 = undefined;
+    io.random(&message_secret);
+
+    const content = try encodeTextMessage(allocator, text);
+    defer allocator.free(content);
+
+    var info = std.ArrayList(u8).empty;
+    defer info.deinit(allocator);
+    try info.appendSlice(allocator, stanza_id);
+    try info.appendSlice(allocator, sender_jid);
+    try info.appendSlice(allocator, remote_jid);
+    try info.appendSlice(allocator, "Report Token");
+
+    const prk = HkdfSha256.extract("", &message_secret);
+    var key: [32]u8 = undefined;
+    HkdfSha256.expand(&key, info.items, prk);
+
+    var mac: [HmacSha256.mac_length]u8 = undefined;
+    HmacSha256.create(&mac, content, &key);
+
+    var token: [16]u8 = undefined;
+    @memcpy(&token, mac[0..16]);
+
+    return .{
+        .message_secret = message_secret,
+        .reporting_token = token,
+    };
+}
+
+pub fn buildReportingNode(
+    allocator: std.mem.Allocator,
+    reporting: *const ReportingContext,
+) !binary.Node {
+    var reporting_node = try binary.Node.init(allocator, "reporting");
+    errdefer reporting_node.deinit();
+
+    var token_node = try binary.Node.init(allocator, "reporting_token");
+    errdefer token_node.deinit();
+    try token_node.addAttribute("v", "2");
+    try token_node.setContentBytes(&reporting.reporting_token);
+    try reporting_node.addChild(&token_node);
+    return reporting_node;
 }
 
 /// Decode protobuf Message and extract text content.
@@ -394,26 +466,6 @@ test "buildFanoutMessageNode supports multiple participants" {
     try std.testing.expectEqualStrings("111:4@s.whatsapp.net", tos[1].getAttribute("jid") orelse "");
 }
 
-test "buildLegacyMessageNode uses top-level enc shape" {
-    const allocator = std.testing.allocator;
-
-    var node = try buildLegacyMessageNode(
-        allocator,
-        "559984726662@s.whatsapp.net",
-        "3EB0123456789ABCDEFFF2",
-        &[_]u8{0xAA},
-        false,
-        null,
-    );
-    defer node.deinit();
-
-    try std.testing.expectEqualStrings("559984726662@s.whatsapp.net", node.getAttribute("to") orelse "");
-    const children = node.getContentNodes().?;
-    try std.testing.expectEqual(@as(usize, 1), children.len);
-    try std.testing.expectEqualStrings("enc", children[0].tag);
-    try std.testing.expectEqualStrings("msg", children[0].getAttribute("type") orelse "");
-}
-
 test "encodeDeviceSentTextMessage wraps payload in DeviceSentMessage" {
     const allocator = std.testing.allocator;
 
@@ -428,6 +480,26 @@ test "encodeDeviceSentTextMessage wraps payload in DeviceSentMessage" {
     try std.testing.expectEqualStrings("236395184570386@lid", dsm.destinationJid orelse "");
     try std.testing.expectEqualStrings("", dsm.phash orelse "");
     try std.testing.expectEqualStrings("pong", dsm.message.?.conversation orelse "");
+}
+
+test "encodeTextMessageWithContext adds message context" {
+    const allocator = std.testing.allocator;
+
+    const reporting = ReportingContext{
+        .message_secret = [_]u8{1} ** 32,
+        .reporting_token = [_]u8{2} ** 16,
+    };
+
+    const encoded = try encodeTextMessageWithContext(allocator, "pong", &reporting);
+    defer allocator.free(encoded);
+
+    var reader: std.Io.Reader = .fixed(encoded);
+    var msg = try whatsapp.Message.decode(&reader, allocator);
+    defer msg.deinit(allocator);
+
+    const ctx = msg.messageContextInfo orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(u8, &reporting.message_secret, ctx.messageSecret orelse &.{});
+    try std.testing.expectEqual(@as(i32, 2), ctx.reportingTokenVersion orelse 0);
 }
 
 test "encodeTextMessage matches generated whatsapp.Message bytes" {
