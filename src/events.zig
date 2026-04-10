@@ -34,7 +34,7 @@ pub const Event = union(enum) {
     pub const Message = struct {
         /// Sender's JID
         from: []const u8,
-        /// Chat JID (same as from for 1:1, group JID for groups)
+        /// Chat JID. For self-sent device echoes this comes from `recipient`.
         chat: []const u8,
         /// Message ID
         id: []const u8,

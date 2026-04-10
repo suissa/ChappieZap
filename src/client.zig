@@ -18,11 +18,17 @@ pub const Event = events.Event;
 pub const EventHandler = events.EventHandler;
 
 pub const ClientOptions = struct {
+    pub const DirectMessageMode = enum {
+        wa_web_fanout,
+        legacy_single_enc,
+    };
+
     host: []const u8 = "web.whatsapp.com",
     port: u16 = 443,
     tls: bool = true,
     tls_ca_cert_path: ?[]const u8 = null,
     path: []const u8 = "/ws/chat",
+    direct_message_mode: DirectMessageMode = .wa_web_fanout,
     on_event: ?EventHandler = null,
     event_context: ?*anyopaque = null,
 };
@@ -46,6 +52,8 @@ pub const Client = struct {
     registration_id: u32,
     adv_secret_key: [32]u8,
     app_version: AppVersion = .{},
+    account_device_identity: ?[]u8 = null,
+    own_device_jids: std.ArrayList([]u8) = .empty,
     sessions: std.ArrayList(SessionEntry) = .empty,
     _last_msg_text: ?[]u8 = null,
 
@@ -93,6 +101,9 @@ pub const Client = struct {
 
     pub fn deinit(self: *Client) void {
         if (self._last_msg_text) |t| self.allocator.free(t);
+        if (self.account_device_identity) |bytes| self.allocator.free(bytes);
+        for (self.own_device_jids.items) |jid| self.allocator.free(jid);
+        self.own_device_jids.deinit(self.allocator);
         for (self.sessions.items) |*entry| {
             self.allocator.free(entry.jid);
             entry.session.deinit();
@@ -139,28 +150,58 @@ pub const Client = struct {
     /// Send a text message to a JID. Handles session management automatically:
     /// fetches prekeys and establishes a session if needed, then encrypts and sends.
     pub fn sendMessage(self: *Client, to_jid: []const u8, text: []const u8) !void {
-        if (self.findSession(to_jid) != null) {
-            return self.sendEncrypted(to_jid, text, null);
+        if (self.isSelfChatJid(to_jid) and self.own_device_jids.items.len != 0) {
+            return self.sendSelfChatFanout(to_jid, text);
+        }
+        const encryption_jid = self.resolveEncryptionJid(to_jid);
+        if (self.findSession(encryption_jid) != null) {
+            return self.sendEncrypted(to_jid, encryption_jid, text, null);
         }
         // No session yet — fetch prekeys, create session, send as pkmsg
-        const bundle = try self.fetchPrekeys(to_jid);
-        const pk_params = try self.createSession(to_jid, bundle);
-        return self.sendEncrypted(to_jid, text, pk_params);
+        const bundle = try self.fetchPrekeys(encryption_jid);
+        const pk_params = try self.createSession(encryption_jid, bundle);
+        return self.sendEncrypted(to_jid, encryption_jid, text, pk_params);
     }
 
     /// Wait for an incoming message containing the expected text.
     /// Reads and processes nodes until the text matches or timeout.
     pub fn waitForText(self: *Client, expected: []const u8, timeout_ms: u32) !void {
-        var attempts: usize = 0;
-        while (attempts < 100) : (attempts += 1) {
-            var node = self.receiveNodeTimeout(timeout_ms) catch continue;
+        const start = std.Io.Clock.awake.now(self.io);
+        while (true) {
+            const elapsed_ms = start.durationTo(std.Io.Clock.awake.now(self.io)).toMilliseconds();
+            if (elapsed_ms >= timeout_ms) return error.TextNotFound;
+            const remaining_ms: u32 = @intCast(timeout_ms - elapsed_ms);
+
+            var node = self.receiveNodeTimeout(remaining_ms) catch |err| switch (err) {
+                error.Timeout => continue,
+                else => return err,
+            };
             defer node.deinit();
             self.processNode(&node);
             if (self._last_msg_text) |text| {
                 if (std.mem.eql(u8, text, expected)) return;
             }
         }
-        return error.TextNotFound;
+    }
+
+    /// Wait for an incoming message whose decrypted body contains `expected`.
+    pub fn waitForTextContains(self: *Client, expected: []const u8, timeout_ms: u32) !void {
+        const start = std.Io.Clock.awake.now(self.io);
+        while (true) {
+            const elapsed_ms = start.durationTo(std.Io.Clock.awake.now(self.io)).toMilliseconds();
+            if (elapsed_ms >= timeout_ms) return error.TextNotFound;
+            const remaining_ms: u32 = @intCast(timeout_ms - elapsed_ms);
+
+            var node = self.receiveNodeTimeout(remaining_ms) catch |err| switch (err) {
+                error.Timeout => continue,
+                else => return err,
+            };
+            defer node.deinit();
+            self.processNode(&node);
+            if (self._last_msg_text) |text| {
+                if (std.mem.indexOf(u8, text, expected) != null) return;
+            }
+        }
     }
 
     pub fn isConnected(self: *const Client) bool {
@@ -170,6 +211,9 @@ pub const Client = struct {
     fn decryptMessageNode(self: *Client, node: *const binary.Node) ?[]u8 {
         const children = node.getContentNodes() orelse return null;
         const from_jid = node.getAttribute("from") orelse return null;
+        const resolved = self.resolveIncomingEncryptionJid(node, from_jid);
+        defer if (resolved.owned) |jid| self.allocator.free(jid);
+        const encryption_jid = resolved.jid;
 
         for (children) |*child| {
             if (!std.mem.eql(u8, child.tag, "enc")) continue;
@@ -180,12 +224,12 @@ pub const Client = struct {
             };
 
             if (std.mem.eql(u8, enc_type, "pkmsg")) {
-                return self.decryptPreKeyMessage(from_jid, ciphertext) catch |err| {
+                return self.decryptPreKeyMessage(encryption_jid, ciphertext) catch |err| {
                     log.warn("Client/Decrypt", "pkmsg decrypt failed: {}", .{err});
                     return null;
                 };
             } else if (std.mem.eql(u8, enc_type, "msg")) {
-                return self.decryptSessionMessage(from_jid, ciphertext) catch |err| {
+                return self.decryptSessionMessage(encryption_jid, ciphertext) catch |err| {
                     log.warn("Client/Decrypt", "msg decrypt failed: {}", .{err});
                     return null;
                 };
@@ -447,6 +491,11 @@ pub const Client = struct {
             device_identity,
         );
         defer self.allocator.free(pair_crypto.self_signed_identity_bytes);
+        if (self.account_device_identity) |old| self.allocator.free(old);
+        self.account_device_identity = try self.allocator.dupe(
+            u8,
+            pair_crypto.self_signed_identity_bytes,
+        );
 
         var response = try pair_mod.buildPairDeviceSignResponse(
             self.allocator,
@@ -472,7 +521,7 @@ pub const Client = struct {
                 self.is_logged_in = true;
                 if (node.getAttribute("lid")) |lid| {
                     if (self.lid) |old| self.allocator.free(old);
-                    self.lid = self.allocator.dupe(u8, lid) catch null;
+                    self.lid = stripDeviceFromJid(self.allocator, lid) catch null;
                 }
                 break;
             }
@@ -518,6 +567,10 @@ pub const Client = struct {
             return;
         }
 
+        if (std.mem.eql(u8, tag, "notification")) {
+            self.maybeUpdateOwnDeviceList(node);
+        }
+
         if (std.mem.eql(u8, tag, "message")) {
             const decrypted = self.decryptMessageNode(node);
             defer if (decrypted) |d| self.allocator.free(d);
@@ -531,7 +584,7 @@ pub const Client = struct {
 
             self.emit(.{ .message = .{
                 .from = node.getAttribute("from") orelse "",
-                .chat = node.getAttribute("from") orelse "",
+                .chat = messageChatJid(self, node),
                 .id = node.getAttribute("id") orelse "",
                 .node = node,
                 .body = body,
@@ -547,9 +600,18 @@ pub const Client = struct {
 
     // --- Internal: Message Send ---
 
-    fn sendEncrypted(self: *Client, to_jid: []const u8, text: []const u8, prekey_params: ?PreKeyMsgParams) !void {
-        const session = self.findSession(to_jid) orelse return error.NoSession;
-        const plaintext = try messaging.encodeTextMessage(self.allocator, text);
+    fn sendEncrypted(
+        self: *Client,
+        chat_jid: []const u8,
+        encryption_jid: []const u8,
+        text: []const u8,
+        prekey_params: ?PreKeyMsgParams,
+    ) !void {
+        const session = self.findSession(encryption_jid) orelse return error.NoSession;
+        const plaintext = if (self.isSelfChatJid(chat_jid))
+            try messaging.encodeDeviceSentTextMessage(self.allocator, chat_jid, text)
+        else
+            try messaging.encodeTextMessage(self.allocator, text);
         defer self.allocator.free(plaintext);
         var encrypted_msg = try session.encrypt(self.allocator, plaintext, self.io);
         defer encrypted_msg.deinit(self.allocator);
@@ -573,7 +635,25 @@ pub const Client = struct {
         defer self.allocator.free(ciphertext);
 
         const msg_id_arr = messaging.generateMessageId(self.io);
-        var msg_node = try messaging.buildMessageNode(self.allocator, to_jid, &msg_id_arr, ciphertext, prekey_params != null);
+        var msg_node = switch (self.options.direct_message_mode) {
+            .wa_web_fanout => try messaging.buildMessageNode(
+                self.allocator,
+                chat_jid,
+                encryption_jid,
+                &msg_id_arr,
+                ciphertext,
+                prekey_params != null,
+                if (prekey_params != null) self.account_device_identity else null,
+            ),
+            .legacy_single_enc => try messaging.buildLegacyMessageNode(
+                self.allocator,
+                chat_jid,
+                &msg_id_arr,
+                ciphertext,
+                prekey_params != null,
+                if (prekey_params != null) self.account_device_identity else null,
+            ),
+        };
         defer msg_node.deinit();
         try self.sendNode(&msg_node);
     }
@@ -590,7 +670,7 @@ pub const Client = struct {
             var node = try self.receiveNodeTimeout(5_000);
             if (std.mem.eql(u8, node.tag, "iq")) {
                 const node_id = node.getAttribute("id") orelse "";
-                if (std.mem.eql(u8, node_id, iq_id)) {
+                if (iqIdsMatch(node_id, iq_id)) {
                     defer node.deinit();
                     return parsePreKeyResponse(&node);
                 }
@@ -601,8 +681,154 @@ pub const Client = struct {
         return error.PreKeyFetchTimeout;
     }
 
+    const EncryptedPayload = struct {
+        ciphertext: []u8,
+        is_prekey: bool,
+    };
+
+    fn encryptPayloadForJid(
+        self: *Client,
+        target_jid: []const u8,
+        plaintext: []const u8,
+    ) !EncryptedPayload {
+        const session = self.findSession(target_jid) orelse blk: {
+            const bundle = try self.fetchPrekeys(target_jid);
+            _ = try self.createSession(target_jid, bundle);
+            break :blk self.findSession(target_jid) orelse return error.NoSession;
+        };
+
+        var encrypted_msg = try session.encrypt(self.allocator, plaintext, self.io);
+        defer encrypted_msg.deinit(self.allocator);
+        const signal_msg_bytes = try signal.message.serializeSignalMessage(self.allocator, &encrypted_msg);
+        defer self.allocator.free(signal_msg_bytes);
+
+        if (session.remote_registration_id == 0) return error.InvalidRemoteRegistrationId;
+
+        if (self.findSession(target_jid) == null) unreachable;
+
+        // If we had to create the session in this call, it must be sent as a prekey message.
+        if (session.previous_counter == 0 and session.their_ratchet_key != null and session.sending_chain != null and session.receiving_chain != null and session.remote_registration_id != 0) {
+            // Heuristic is not reliable enough; fall back to checking whether a session
+            // existed before this call by looking up again before creation at call sites.
+        }
+
+        return .{
+            .ciphertext = try self.allocator.dupe(u8, signal_msg_bytes),
+            .is_prekey = false,
+        };
+    }
+
+    fn sendSelfChatFanout(self: *Client, chat_jid: []const u8, text: []const u8) !void {
+        const plaintext = try messaging.encodeDeviceSentTextMessage(self.allocator, chat_jid, text);
+        defer self.allocator.free(plaintext);
+
+        var fanout_targets = std.ArrayList([]const u8).empty;
+        defer fanout_targets.deinit(self.allocator);
+
+        try fanout_targets.append(self.allocator, chat_jid);
+        for (self.own_device_jids.items) |jid| {
+            if (std.mem.eql(u8, jid, chat_jid)) continue;
+            try fanout_targets.append(self.allocator, jid);
+        }
+
+        var participants = std.ArrayList(messaging.DirectParticipant).empty;
+        defer {
+            for (participants.items) |p| self.allocator.free(p.ciphertext);
+            participants.deinit(self.allocator);
+        }
+
+        var any_prekey = false;
+        log.debug("Client/Send", "Self-chat fanout for {s}: {d} known own device(s)", .{
+            chat_jid,
+            fanout_targets.items.len,
+        });
+        for (fanout_targets.items) |participant_jid| {
+            if (self.isCurrentDeviceJid(participant_jid)) continue;
+
+            const encryption_jid = try self.resolveDeviceEncryptionJid(participant_jid);
+            defer if (!std.mem.eql(u8, encryption_jid, participant_jid)) self.allocator.free(encryption_jid);
+
+            const had_session = self.findSession(encryption_jid) != null;
+            const payload = try self.encryptPayloadForFanoutTarget(
+                participant_jid,
+                encryption_jid,
+                plaintext,
+                had_session,
+            );
+            errdefer self.allocator.free(payload.ciphertext);
+            log.debug("Client/Send", "  participant={s} encryption={s} prekey={any}", .{
+                participant_jid,
+                encryption_jid,
+                payload.is_prekey,
+            });
+            any_prekey = any_prekey or payload.is_prekey;
+            try participants.append(self.allocator, .{
+                .jid = participant_jid,
+                .ciphertext = payload.ciphertext,
+                .is_prekey = payload.is_prekey,
+            });
+        }
+
+        if (participants.items.len == 0) {
+            const encryption_jid = self.resolveEncryptionJid(chat_jid);
+            return self.sendEncrypted(chat_jid, encryption_jid, text, null);
+        }
+
+        const msg_id_arr = messaging.generateMessageId(self.io);
+        var msg_node = try messaging.buildFanoutMessageNode(
+            self.allocator,
+            chat_jid,
+            &msg_id_arr,
+            participants.items,
+            if (any_prekey) self.account_device_identity else null,
+        );
+        defer msg_node.deinit();
+        try self.sendNode(&msg_node);
+    }
+
+    fn encryptPayloadForFanoutTarget(
+        self: *Client,
+        participant_jid: []const u8,
+        encryption_jid: []const u8,
+        plaintext: []const u8,
+        had_session: bool,
+    ) !EncryptedPayload {
+        if (had_session) {
+            const session = self.findSession(encryption_jid) orelse return error.NoSession;
+            var encrypted_msg = try session.encrypt(self.allocator, plaintext, self.io);
+            defer encrypted_msg.deinit(self.allocator);
+            const signal_msg_bytes = try signal.message.serializeSignalMessage(self.allocator, &encrypted_msg);
+            defer self.allocator.free(signal_msg_bytes);
+            return .{
+                .ciphertext = try self.allocator.dupe(u8, signal_msg_bytes),
+                .is_prekey = false,
+            };
+        }
+
+        const bundle = try self.fetchPrekeys(participant_jid);
+        const pk = try self.createSession(encryption_jid, bundle);
+        const session = self.findSession(encryption_jid) orelse return error.NoSession;
+        var encrypted_msg = try session.encrypt(self.allocator, plaintext, self.io);
+        defer encrypted_msg.deinit(self.allocator);
+        const signal_msg_bytes = try signal.message.serializeSignalMessage(self.allocator, &encrypted_msg);
+        defer self.allocator.free(signal_msg_bytes);
+        return .{
+            .ciphertext = try signal.message.serializePreKeySignalMessage(
+                self.allocator,
+                pk.registration_id,
+                pk.prekey_id,
+                pk.signed_prekey_id,
+                pk.base_key,
+                self.identity.key_pair.public,
+                signal_msg_bytes,
+            ),
+            .is_prekey = true,
+        };
+    }
+
     fn createSession(self: *Client, jid: []const u8, bundle: prekey_mod.PreKeyBundle) !PreKeyMsgParams {
         const base_key = signal.KeyPair.generate(self.io);
+        const sending_ratchet_key = signal.KeyPair.generate(self.io);
         const x3dh_result = try signal.ratchet.x3dh(
             self.identity,
             base_key,
@@ -615,7 +841,7 @@ pub const Client = struct {
             x3dh_result,
             self.identity.key_pair.public,
             bundle.identity_key,
-            base_key,
+            sending_ratchet_key,
             bundle.signed_prekey_public,
             self.registration_id,
             bundle.registration_id,
@@ -705,6 +931,13 @@ pub const Client = struct {
         return null;
     }
 
+    fn hasSession(self: *const Client, jid: []const u8) bool {
+        for (self.sessions.items) |entry| {
+            if (std.mem.eql(u8, entry.jid, jid)) return true;
+        }
+        return false;
+    }
+
     fn storeSession(self: *Client, jid: []const u8, session: signal.Session) !void {
         for (self.sessions.items) |*entry| {
             if (std.mem.eql(u8, entry.jid, jid)) {
@@ -715,6 +948,111 @@ pub const Client = struct {
         }
         const jid_owned = try self.allocator.dupe(u8, jid);
         try self.sessions.append(self.allocator, .{ .jid = jid_owned, .session = session });
+    }
+
+    fn isSelfChatJid(self: *const Client, jid: []const u8) bool {
+        if (self.lid) |own_lid| if (jidMatchesUserServer(jid, own_lid)) return true;
+        if (self.phone_jid) |own_pn| if (jidMatchesUserServer(jid, own_pn)) return true;
+        return false;
+    }
+
+    fn isCurrentDeviceJid(self: *const Client, jid: []const u8) bool {
+        if (self.phone_jid) |phone_jid| {
+            var buf: [96]u8 = undefined;
+            if (std.mem.indexOfScalar(u8, phone_jid, '@')) |at| {
+                const current = std.fmt.bufPrint(&buf, "{s}:{d}{s}", .{
+                    phone_jid[0..at],
+                    self.device_id,
+                    phone_jid[at..],
+                }) catch return false;
+                return std.mem.eql(u8, jid, current);
+            }
+        }
+        return false;
+    }
+
+    fn resolveEncryptionJid(self: *const Client, chat_jid: []const u8) []const u8 {
+        if (self.isSelfChatJid(chat_jid)) {
+            if (self.lid) |own_lid| return own_lid;
+        }
+        return chat_jid;
+    }
+
+    fn resolveDeviceEncryptionJid(self: *const Client, participant_jid: []const u8) ![]const u8 {
+        if (self.phone_jid) |phone_jid| {
+            if (jidMatchesUserServer(participant_jid, phone_jid)) {
+                if (self.lid) |own_lid| {
+                    return withDeviceFromJid(self.allocator, own_lid, participant_jid);
+                }
+            }
+        }
+        return self.allocator.dupe(u8, participant_jid);
+    }
+
+    fn maybeUpdateOwnDeviceList(self: *Client, node: *const binary.Node) void {
+        const ntype = node.getAttribute("type") orelse return;
+        if (!std.mem.eql(u8, ntype, "account_sync")) return;
+        const from = node.getAttribute("from") orelse return;
+        if (!self.isSelfChatJid(from)) return;
+
+        const children = node.getContentNodes() orelse return;
+        for (children) |*child| {
+            if (!std.mem.eql(u8, child.tag, "devices")) continue;
+            const device_children = child.getContentNodes() orelse return;
+
+            for (self.own_device_jids.items) |jid| self.allocator.free(jid);
+            self.own_device_jids.clearRetainingCapacity();
+
+            for (device_children) |*device_node| {
+                if (!std.mem.eql(u8, device_node.tag, "device")) continue;
+                const jid = device_node.getAttribute("jid") orelse continue;
+                const duped = self.allocator.dupe(u8, jid) catch continue;
+                self.own_device_jids.append(self.allocator, duped) catch {
+                    self.allocator.free(duped);
+                    continue;
+                };
+            }
+            log.debug("Client/Devices", "Updated own device list from account_sync: {d} device(s)", .{
+                self.own_device_jids.items.len,
+            });
+            for (self.own_device_jids.items) |jid| {
+                log.debug("Client/Devices", "  own device {s}", .{jid});
+            }
+            return;
+        }
+    }
+
+    fn resolveIncomingEncryptionJid(
+        self: *const Client,
+        node: *const binary.Node,
+        from_jid: []const u8,
+    ) struct { jid: []const u8, owned: ?[]u8 = null } {
+        // For self-account PN messages, Rust resolves the sender to the corresponding
+        // LID for Signal session lookup. This is critical for self-sync/key-share
+        // messages that arrive from our PN but belong to the same LID identity.
+        if (self.phone_jid) |phone_jid| {
+            if (jidMatchesUserServer(from_jid, phone_jid)) {
+                if (self.lid) |own_lid| {
+                    const mapped = withDeviceFromJid(self.allocator, own_lid, from_jid) catch null;
+                    if (mapped) |jid| return .{ .jid = jid, .owned = jid };
+                }
+            }
+        }
+
+        // For PN-addressed messages from other users, prefer sender_lid when present.
+        if (std.mem.indexOfScalar(u8, from_jid, '@')) |at| {
+            if (std.mem.eql(u8, from_jid[at..], "@s.whatsapp.net")) {
+                if (node.getAttribute("sender_lid")) |sender_lid| {
+                    // Prefer whichever address already has a live session. Rust keeps
+                    // PN↔LID mappings and resolves dynamically; we emulate that here.
+                    if (self.hasSession(sender_lid)) return .{ .jid = sender_lid };
+                    if (self.hasSession(from_jid)) return .{ .jid = from_jid };
+                    return .{ .jid = sender_lid };
+                }
+            }
+        }
+
+        return .{ .jid = from_jid };
     }
 
     // --- Internal: Prekey Parsing ---
@@ -932,6 +1270,54 @@ fn stripDeviceFromJid(allocator: std.mem.Allocator, jid: []const u8) ![]u8 {
     return allocator.dupe(u8, jid);
 }
 
+fn withDeviceFromJid(
+    allocator: std.mem.Allocator,
+    base_jid: []const u8,
+    device_source_jid: []const u8,
+) ![]u8 {
+    const base_at = std.mem.indexOfScalar(u8, base_jid, '@') orelse return allocator.dupe(u8, base_jid);
+    const source_at = std.mem.indexOfScalar(u8, device_source_jid, '@') orelse return allocator.dupe(u8, base_jid);
+    const source_user = device_source_jid[0..source_at];
+    const colon = std.mem.indexOfScalar(u8, source_user, ':') orelse return allocator.dupe(u8, base_jid);
+    return std.fmt.allocPrint(allocator, "{s}:{s}{s}", .{
+        base_jid[0..base_at],
+        source_user[colon + 1 ..],
+        base_jid[base_at..],
+    });
+}
+
+fn messageChatJid(self: *const Client, node: *const binary.Node) []const u8 {
+    const from = node.getAttribute("from") orelse return "";
+
+    // Self-sent device echoes should reply to the chat/recipient JID, not the
+    // specific sending device JID.
+    if (self.isSelfChatJid(from)) {
+        if (node.getAttribute("recipient")) |recipient| return recipient;
+    }
+
+    return from;
+}
+
+fn jidMatchesUserServer(a: []const u8, b: []const u8) bool {
+    const a_at = std.mem.indexOfScalar(u8, a, '@') orelse return false;
+    const b_at = std.mem.indexOfScalar(u8, b, '@') orelse return false;
+    if (!std.mem.eql(u8, a[a_at..], b[b_at..])) return false;
+
+    const a_user_end = std.mem.indexOfScalar(u8, a[0..a_at], ':') orelse a_at;
+    const b_user_end = std.mem.indexOfScalar(u8, b[0..b_at], ':') orelse b_at;
+    return std.mem.eql(u8, a[0..a_user_end], b[0..b_user_end]);
+}
+
+fn iqIdsMatch(actual: []const u8, expected: []const u8) bool {
+    if (std.mem.eql(u8, actual, expected)) return true;
+    // WA server often responds to numeric IQ ids with a trailing "F"
+    // (e.g. request "2" -> result "2F").
+    if (actual.len == expected.len + 1 and actual[actual.len - 1] == 'F') {
+        return std.mem.eql(u8, actual[0..expected.len], expected);
+    }
+    return false;
+}
+
 fn buildIqResultNode(
     allocator: std.mem.Allocator,
     id: ?[]const u8,
@@ -1110,4 +1496,46 @@ test "pairing payload keeps rust-compatible device props" {
     defer device_props.deinit(allocator);
 
     try std.testing.expectEqualStrings("rust", device_props.os orelse "");
+}
+
+test "message chat jid uses recipient for self-sent device echoes" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client = try Client.init(allocator, io, .{});
+    defer client.deinit();
+    client.phone_jid = try allocator.dupe(u8, "559984726662@s.whatsapp.net");
+    client.lid = try allocator.dupe(u8, "236395184570386@lid");
+
+    var node = try binary.Node.init(allocator, "message");
+    defer node.deinit();
+    try node.addAttribute("from", "559984726662:4@s.whatsapp.net");
+    try node.addAttribute("recipient", "559984726662@s.whatsapp.net");
+
+    try std.testing.expectEqualStrings(
+        "559984726662@s.whatsapp.net",
+        messageChatJid(&client, &node),
+    );
+}
+
+test "iqIdsMatch accepts whatsapp trailing F suffix" {
+    try std.testing.expect(iqIdsMatch("2F", "2"));
+    try std.testing.expect(iqIdsMatch("345F", "345"));
+    try std.testing.expect(iqIdsMatch("7", "7"));
+    try std.testing.expect(!iqIdsMatch("27F", "2"));
+    try std.testing.expect(!iqIdsMatch("2X", "2"));
+}
+
+test "resolveDeviceEncryptionJid maps own pn device to lid device" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client = try Client.init(allocator, io, .{});
+    defer client.deinit();
+    client.phone_jid = try allocator.dupe(u8, "559984726662@s.whatsapp.net");
+    client.lid = try allocator.dupe(u8, "236395184570386@lid");
+
+    const mapped = try client.resolveDeviceEncryptionJid("559984726662:4@s.whatsapp.net");
+    defer allocator.free(mapped);
+    try std.testing.expectEqualStrings("236395184570386:4@lid", mapped);
 }

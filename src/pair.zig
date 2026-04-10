@@ -11,7 +11,7 @@ const ADV_HOSTED_PREFIX_DEVICE_SIGNATURE_VERIFICATION = [_]u8{ 6, 6 };
 /// server is sensitive to this exact payload shape during pairing.
 pub fn makePairingDeviceProps() whatsapp.DeviceProps {
     return .{
-        .os = "rust",
+        .os = "zig",
         .version = .{ .primary = 0, .secondary = 1, .tertiary = 0 },
         .platformType = .UNKNOWN,
         .requireFullSync = true,

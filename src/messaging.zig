@@ -1,7 +1,10 @@
 const std = @import("std");
 const binary = @import("binary");
+const protobuf = @import("protobuf");
 const signal = @import("signal");
 const prekey_mod = @import("prekey");
+const whatsapp = @import("whatsapp_proto");
+const fd = protobuf.fd;
 // Protobuf field numbers from wa.Message:
 // field 1  = conversation (string)
 // field 6  = extendedTextMessage (submessage) → field 1 = text
@@ -31,27 +34,138 @@ pub fn buildFetchPrekeysIq(allocator: std.mem.Allocator, iq_id: []const u8, jids
     return iq;
 }
 
-/// Build a message stanza with Signal-encrypted content
-/// <message to="..." id="..." t="..." type="text"><enc type="pkmsg|msg" v="2">ciphertext</enc></message>
-pub fn buildMessageNode(
-    allocator: std.mem.Allocator,
-    to_jid: []const u8,
-    msg_id: []const u8,
+/// Build a direct-message fanout stanza with one participant.
+/// Matches the Rust DM send shape more closely than a bare top-level <enc/>.
+/// <message to="..." id="..." type="text">
+///   <participants>
+///     <to jid="..."><enc type="pkmsg|msg" v="2">ciphertext</enc></to>
+///   </participants>
+/// </message>
+pub const DirectParticipant = struct {
+    jid: []const u8,
     ciphertext: []const u8,
-    is_prekey_msg: bool,
+    is_prekey: bool,
+};
+
+const OutboundMessage = struct {
+    conversation: ?[]const u8 = null,
+    deviceSentMessage: ?OutboundDeviceSentMessage = null,
+
+    pub const _desc_table = .{
+        .conversation = fd(1, .{ .scalar = .string }),
+        .deviceSentMessage = fd(31, .submessage),
+    };
+
+    pub fn encode(
+        self: @This(),
+        writer: *std.Io.Writer,
+        allocator: std.mem.Allocator,
+    ) (std.Io.Writer.Error || std.mem.Allocator.Error)!void {
+        return protobuf.encode(writer, allocator, self);
+    }
+};
+
+const OutboundDeviceSentMessage = struct {
+    destinationJid: ?[]const u8 = null,
+    message: ?*const OutboundMessage = null,
+    phash: ?[]const u8 = null,
+
+    pub const _desc_table = .{
+        .destinationJid = fd(1, .{ .scalar = .string }),
+        .message = fd(2, .submessage),
+        .phash = fd(3, .{ .scalar = .string }),
+    };
+
+    pub fn encode(
+        self: @This(),
+        writer: *std.Io.Writer,
+        allocator: std.mem.Allocator,
+    ) (std.Io.Writer.Error || std.mem.Allocator.Error)!void {
+        return protobuf.encode(writer, allocator, self);
+    }
+};
+
+pub fn buildFanoutMessageNode(
+    allocator: std.mem.Allocator,
+    chat_jid: []const u8,
+    msg_id: []const u8,
+    participants_data: []const DirectParticipant,
+    device_identity_bytes: ?[]const u8,
 ) !binary.Node {
     var msg = try binary.Node.init(allocator, "message");
     errdefer msg.deinit();
 
-    try msg.addAttribute("to", to_jid);
+    try msg.addAttribute("to", chat_jid);
     try msg.addAttribute("id", msg_id);
     try msg.addAttribute("type", "text");
 
-    // Timestamp as string
-    var ts_buf: [20]u8 = undefined;
-    // Use a fixed timestamp for now since we don't have access to io.clock
-    const ts_str = std.fmt.bufPrint(&ts_buf, "{d}", .{@as(u64, 1700000000)}) catch "1700000000";
-    try msg.addAttribute("t", ts_str);
+    var participants = try binary.Node.init(allocator, "participants");
+    defer participants.deinit();
+
+    var any_prekey = false;
+    for (participants_data) |participant| {
+        var to_node = try binary.Node.init(allocator, "to");
+        defer to_node.deinit();
+        try to_node.addAttribute("jid", participant.jid);
+
+        var enc_node = try binary.Node.init(allocator, "enc");
+        defer enc_node.deinit();
+        try enc_node.addAttribute("v", "2");
+        try enc_node.addAttribute("type", if (participant.is_prekey) "pkmsg" else "msg");
+        try enc_node.setContentBytes(participant.ciphertext);
+        try to_node.addChild(&enc_node);
+        try participants.addChild(&to_node);
+
+        any_prekey = any_prekey or participant.is_prekey;
+    }
+
+    try msg.addChild(&participants);
+
+    if (any_prekey) {
+        if (device_identity_bytes) |bytes| {
+            var device_identity = try binary.Node.init(allocator, "device-identity");
+            defer device_identity.deinit();
+            try device_identity.setContentBytes(bytes);
+            try msg.addChild(&device_identity);
+        }
+    }
+
+    return msg;
+}
+
+pub fn buildMessageNode(
+    allocator: std.mem.Allocator,
+    chat_jid: []const u8,
+    participant_jid: []const u8,
+    msg_id: []const u8,
+    ciphertext: []const u8,
+    is_prekey_msg: bool,
+    device_identity_bytes: ?[]const u8,
+) !binary.Node {
+    return buildFanoutMessageNode(allocator, chat_jid, msg_id, &[_]DirectParticipant{.{
+        .jid = participant_jid,
+        .ciphertext = ciphertext,
+        .is_prekey = is_prekey_msg,
+    }}, device_identity_bytes);
+}
+
+/// Legacy mock-server compatible direct message shape:
+/// <message to="..." id="..." type="text"><enc .../></message>
+/// Optionally appends <device-identity/> for pkmsg.
+pub fn buildLegacyMessageNode(
+    allocator: std.mem.Allocator,
+    chat_jid: []const u8,
+    msg_id: []const u8,
+    ciphertext: []const u8,
+    is_prekey_msg: bool,
+    device_identity_bytes: ?[]const u8,
+) !binary.Node {
+    var msg = try binary.Node.init(allocator, "message");
+    errdefer msg.deinit();
+
+    try msg.addAttribute("to", chat_jid);
+    try msg.addAttribute("id", msg_id);
+    try msg.addAttribute("type", "text");
 
     var enc_node = try binary.Node.init(allocator, "enc");
     defer enc_node.deinit();
@@ -59,6 +173,15 @@ pub fn buildMessageNode(
     try enc_node.addAttribute("type", if (is_prekey_msg) "pkmsg" else "msg");
     try enc_node.setContentBytes(ciphertext);
     try msg.addChild(&enc_node);
+
+    if (is_prekey_msg) {
+        if (device_identity_bytes) |bytes| {
+            var device_identity = try binary.Node.init(allocator, "device-identity");
+            defer device_identity.deinit();
+            try device_identity.setContentBytes(bytes);
+            try msg.addChild(&device_identity);
+        }
+    }
 
     return msg;
 }
@@ -85,21 +208,38 @@ pub fn generateMessageId(io: std.Io) [22]u8 {
 /// Encode a text message as protobuf (simplified — just the conversation field)
 /// This is a minimal Message protobuf with field 1 = conversation text
 pub fn encodeTextMessage(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
-    var buf = std.ArrayList(u8).empty;
-    errdefer buf.deinit(allocator);
+    var writer = std.Io.Writer.Allocating.init(allocator);
+    defer writer.deinit();
 
-    // Protobuf field 1 (conversation), wire type 2 (length-delimited)
-    try buf.append(allocator, 0x0A);
-    // Varint length
-    var len = text.len;
-    while (len >= 0x80) {
-        try buf.append(allocator, @intCast((len & 0x7F) | 0x80));
-        len >>= 7;
-    }
-    try buf.append(allocator, @intCast(len));
-    try buf.appendSlice(allocator, text);
+    const msg = OutboundMessage{
+        .conversation = text,
+    };
+    try msg.encode(&writer.writer, allocator);
+    return writer.toOwnedSlice();
+}
 
-    return buf.toOwnedSlice(allocator);
+/// Wrap a text message in DeviceSentMessage for self-chat / own-device sync.
+/// Rust uses this wrapper for messages routed to our own other devices.
+pub fn encodeDeviceSentTextMessage(
+    allocator: std.mem.Allocator,
+    destination_jid: []const u8,
+    text: []const u8,
+) ![]u8 {
+    const inner = OutboundMessage{
+        .conversation = text,
+    };
+    const outer = OutboundMessage{
+        .deviceSentMessage = .{
+            .destinationJid = destination_jid,
+            .message = &inner,
+            .phash = "",
+        },
+    };
+
+    var writer = std.Io.Writer.Allocating.init(allocator);
+    defer writer.deinit();
+    try outer.encode(&writer.writer, allocator);
+    return writer.toOwnedSlice();
 }
 
 /// Decode protobuf Message and extract text content.
@@ -165,4 +305,174 @@ fn pbVarint(data: []const u8, pos: *usize) ?u64 {
         shift = std.math.add(u6, shift, 7) catch return null;
     }
     return null;
+}
+
+test "buildMessageNode uses participants fanout shape" {
+    const allocator = std.testing.allocator;
+
+    var node = try buildMessageNode(
+        allocator,
+        "559984726662@s.whatsapp.net",
+        "236395184570386@lid",
+        "3EB0123456789ABCDEFFF0",
+        &[_]u8{ 0x01, 0x02, 0x03 },
+        false,
+        null,
+    );
+    defer node.deinit();
+
+    try std.testing.expectEqualStrings("message", node.tag);
+    try std.testing.expectEqualStrings("559984726662@s.whatsapp.net", node.getAttribute("to") orelse "");
+    try std.testing.expectEqualStrings("text", node.getAttribute("type") orelse "");
+    try std.testing.expect(node.getContentNodes() != null);
+    try std.testing.expect(node.getAttribute("t") == null);
+
+    const children = node.getContentNodes().?;
+    try std.testing.expectEqual(@as(usize, 1), children.len);
+    try std.testing.expectEqualStrings("participants", children[0].tag);
+
+    const participant_children = children[0].getContentNodes().?;
+    try std.testing.expectEqual(@as(usize, 1), participant_children.len);
+    try std.testing.expectEqualStrings("to", participant_children[0].tag);
+    try std.testing.expectEqualStrings("236395184570386@lid", participant_children[0].getAttribute("jid") orelse "");
+
+    const enc_children = participant_children[0].getContentNodes().?;
+    try std.testing.expectEqual(@as(usize, 1), enc_children.len);
+    try std.testing.expectEqualStrings("enc", enc_children[0].tag);
+    try std.testing.expectEqualStrings("2", enc_children[0].getAttribute("v") orelse "");
+    try std.testing.expectEqualStrings("msg", enc_children[0].getAttribute("type") orelse "");
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x01, 0x02, 0x03 }, enc_children[0].getContentBytes().?);
+}
+
+test "buildMessageNode adds device-identity for prekey messages" {
+    const allocator = std.testing.allocator;
+
+    const identity_bytes = [_]u8{ 0xAA, 0xBB };
+    var node = try buildMessageNode(
+        allocator,
+        "559984726662@s.whatsapp.net",
+        "236395184570386@lid",
+        "3EB0123456789ABCDEFFF1",
+        &[_]u8{0x01},
+        true,
+        &identity_bytes,
+    );
+    defer node.deinit();
+
+    const children = node.getContentNodes().?;
+    try std.testing.expectEqual(@as(usize, 2), children.len);
+    try std.testing.expectEqualStrings("participants", children[0].tag);
+    try std.testing.expectEqualStrings("device-identity", children[1].tag);
+    try std.testing.expectEqualSlices(u8, &identity_bytes, children[1].getContentBytes().?);
+}
+
+test "buildFanoutMessageNode supports multiple participants" {
+    const allocator = std.testing.allocator;
+
+    const participants = [_]DirectParticipant{
+        .{ .jid = "111@s.whatsapp.net", .ciphertext = &[_]u8{0x01}, .is_prekey = false },
+        .{ .jid = "111:4@s.whatsapp.net", .ciphertext = &[_]u8{ 0x02, 0x03 }, .is_prekey = true },
+    };
+    const device_identity = [_]u8{0xAA};
+    var node = try buildFanoutMessageNode(
+        allocator,
+        "111@s.whatsapp.net",
+        "3EB0123456789ABCDEFFF3",
+        &participants,
+        &device_identity,
+    );
+    defer node.deinit();
+
+    const children = node.getContentNodes().?;
+    try std.testing.expectEqual(@as(usize, 2), children.len);
+    try std.testing.expectEqualStrings("participants", children[0].tag);
+    try std.testing.expectEqualStrings("device-identity", children[1].tag);
+
+    const tos = children[0].getContentNodes().?;
+    try std.testing.expectEqual(@as(usize, 2), tos.len);
+    try std.testing.expectEqualStrings("111@s.whatsapp.net", tos[0].getAttribute("jid") orelse "");
+    try std.testing.expectEqualStrings("111:4@s.whatsapp.net", tos[1].getAttribute("jid") orelse "");
+}
+
+test "buildLegacyMessageNode uses top-level enc shape" {
+    const allocator = std.testing.allocator;
+
+    var node = try buildLegacyMessageNode(
+        allocator,
+        "559984726662@s.whatsapp.net",
+        "3EB0123456789ABCDEFFF2",
+        &[_]u8{0xAA},
+        false,
+        null,
+    );
+    defer node.deinit();
+
+    try std.testing.expectEqualStrings("559984726662@s.whatsapp.net", node.getAttribute("to") orelse "");
+    const children = node.getContentNodes().?;
+    try std.testing.expectEqual(@as(usize, 1), children.len);
+    try std.testing.expectEqualStrings("enc", children[0].tag);
+    try std.testing.expectEqualStrings("msg", children[0].getAttribute("type") orelse "");
+}
+
+test "encodeDeviceSentTextMessage wraps payload in DeviceSentMessage" {
+    const allocator = std.testing.allocator;
+
+    const encoded = try encodeDeviceSentTextMessage(allocator, "236395184570386@lid", "pong");
+    defer allocator.free(encoded);
+
+    var reader: std.Io.Reader = .fixed(encoded);
+    var msg = try whatsapp.Message.decode(&reader, allocator);
+    defer msg.deinit(allocator);
+
+    const dsm = msg.deviceSentMessage orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("236395184570386@lid", dsm.destinationJid orelse "");
+    try std.testing.expectEqualStrings("", dsm.phash orelse "");
+    try std.testing.expectEqualStrings("pong", dsm.message.?.conversation orelse "");
+}
+
+test "encodeTextMessage matches generated whatsapp.Message bytes" {
+    const allocator = std.testing.allocator;
+
+    const ours = try encodeTextMessage(allocator, "pong");
+    defer allocator.free(ours);
+
+    var writer = std.Io.Writer.Allocating.init(allocator);
+    defer writer.deinit();
+    const generated = whatsapp.Message{
+        .conversation = "pong",
+    };
+    try generated.encode(&writer.writer, allocator);
+    const expected = try writer.toOwnedSlice();
+    defer allocator.free(expected);
+
+    try std.testing.expectEqualSlices(u8, expected, ours);
+}
+
+test "encodeDeviceSentTextMessage matches generated whatsapp.Message bytes" {
+    const allocator = std.testing.allocator;
+
+    const ours = try encodeDeviceSentTextMessage(allocator, "236395184570386@lid", "pong");
+    defer allocator.free(ours);
+
+    const inner = try allocator.create(whatsapp.Message);
+    defer allocator.destroy(inner);
+    inner.* = .{
+        .conversation = "pong",
+    };
+    var generated = whatsapp.Message{
+        .deviceSentMessage = .{
+            .destinationJid = "236395184570386@lid",
+            .message = inner,
+            .phash = "",
+        },
+    };
+    defer generated.deinit(allocator);
+
+    var writer = std.Io.Writer.Allocating.init(allocator);
+    defer writer.deinit();
+    try generated.encode(&writer.writer, allocator);
+    const expected = try writer.toOwnedSlice();
+    defer allocator.free(expected);
+
+    try std.testing.expectEqualSlices(u8, expected, ours);
 }

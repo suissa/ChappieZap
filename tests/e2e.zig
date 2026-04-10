@@ -6,6 +6,7 @@ const opts = ClientOptions{
     .host = "localhost",
     .port = 8080,
     .tls = false,
+    .direct_message_mode = .legacy_single_enc,
 };
 
 test "e2e: A sends encrypted message to B" {
@@ -24,4 +25,16 @@ test "e2e: A sends encrypted message to B" {
 
     try a.sendMessage(jid_b, "Hello from Zig!");
     try b.waitForText("Hello from Zig!", 10_000);
+}
+
+test "e2e: zig client talks to whatsapp-rust bot" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    var client = try Client.init(allocator, io, opts);
+    defer client.deinit();
+    try client.connectAndLogin();
+
+    try client.sendMessage("559980000001@s.whatsapp.net", "\xf0\x9f\xa6\x80ping");
+    try client.waitForTextContains("\xf0\x9f\x8f\x93 Pong!", 15_000);
 }

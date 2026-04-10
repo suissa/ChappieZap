@@ -43,7 +43,7 @@ pub const Session = struct {
         local_reg_id: u32,
         remote_reg_id: u32,
     ) !Session {
-        // Perform the first DH ratchet step
+        // Rust/libsignal uses a fresh sending ratchet key here, not the X3DH base key.
         const dh = try our_ratchet_key.dh(their_ratchet_key);
         const step = x3dh_result.root_key.ratchetStep(dh);
 
@@ -77,10 +77,13 @@ pub const Session = struct {
             .local_identity_public = our_identity_public,
             .remote_identity_public = their_identity_public,
             .root_key = x3dh_result.root_key,
-            .sending_chain = null, // Will be created on first send (DH ratchet)
-            .receiving_chain = x3dh_result.chain_key,
+            // Rust/libsignal initializes Bob with a sender chain keyed off the
+            // signed prekey ratchet state and creates the first receiver chain
+            // only when Alice's initial sender ratchet key arrives.
+            .sending_chain = x3dh_result.chain_key,
+            .receiving_chain = null,
             .our_ratchet_key = our_signed_prekey,
-            .their_ratchet_key = null, // Set when receiving a message
+            .their_ratchet_key = null,
             .previous_counter = 0,
             .local_registration_id = local_reg_id,
             .remote_registration_id = remote_reg_id,
@@ -140,7 +143,7 @@ pub const Session = struct {
         if (need_ratchet) {
             // Save previous counter
             if (self.sending_chain) |sc| {
-                self.previous_counter = sc.index;
+                self.previous_counter = if (sc.index > 0) sc.index - 1 else 0;
             }
 
             // DH ratchet with their new key
@@ -206,8 +209,15 @@ pub const EncryptedMessage = struct {
     pub fn computeMac(self: *const EncryptedMessage, serialized_msg: []const u8) [8]u8 {
         var mac: [HmacSha256.mac_length]u8 = undefined;
         var hmac = HmacSha256.init(&self.mac_key);
-        hmac.update(&self.sender_identity);
-        hmac.update(&self.receiver_identity);
+        var sender_identity_serialized: [33]u8 = undefined;
+        sender_identity_serialized[0] = 0x05;
+        @memcpy(sender_identity_serialized[1..], &self.sender_identity);
+        var receiver_identity_serialized: [33]u8 = undefined;
+        receiver_identity_serialized[0] = 0x05;
+        @memcpy(receiver_identity_serialized[1..], &self.receiver_identity);
+
+        hmac.update(&sender_identity_serialized);
+        hmac.update(&receiver_identity_serialized);
         hmac.update(serialized_msg);
         hmac.final(&mac);
         return mac[0..8].*;

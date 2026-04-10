@@ -50,8 +50,8 @@ fn handleEvent(event: zigwhats.Event, ctx: *anyopaque) void {
                 log.info("Main", "  body: {s}", .{body});
                 // Reply to 🦎ping with pong
                 if (std.mem.indexOf(u8, body, "\xf0\x9f\xa6\x8eping")) |_| {
-                    log.info("Main", "Got 🦎ping! Sending pong...", .{});
-                    client.sendMessage(msg.from, "pong") catch |err| {
+                    log.info("Main", "Got 🦎ping! Sending pong to {s}...", .{msg.chat});
+                    client.sendMessage(msg.chat, "pong") catch |err| {
                         log.err("Main", "Reply failed: {}", .{err});
                     };
                 }

@@ -230,21 +230,18 @@ pub const WebSocketClient = struct {
         try conn.flush();
     }
 
-    /// Set a read timeout on the underlying socket (SO_RCVTIMEO).
-    /// Pass null to clear the timeout.
-    pub fn setReadTimeout(self: *WebSocketClient, timeout_ms: ?u32) void {
-        const conn = self.connection orelse return;
+    /// Wait until the underlying socket becomes readable.
+    /// Returns `false` on timeout.
+    pub fn waitReadable(self: *WebSocketClient, timeout_ms: u32) !bool {
+        const conn = self.connection orelse return error.NotConnected;
         const fd = conn.stream_reader.stream.socket.handle;
-        if (timeout_ms) |ms| {
-            const tv = std.posix.timeval{
-                .sec = @intCast(ms / 1000),
-                .usec = @intCast((ms % 1000) * 1000),
-            };
-            std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
-        } else {
-            const tv = std.posix.timeval{ .sec = 0, .usec = 0 };
-            std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
-        }
+        var fds = [_]std.posix.pollfd{.{
+            .fd = fd,
+            .events = std.posix.POLL.IN | std.posix.POLL.ERR | std.posix.POLL.HUP,
+            .revents = 0,
+        }};
+        const rc = try std.posix.poll(&fds, @intCast(timeout_ms));
+        return rc != 0;
     }
 
     /// Read the next WebSocket message from the server.

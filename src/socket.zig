@@ -130,9 +130,6 @@ pub const NoiseSocket = struct {
 
     /// Receive with explicit timeout in milliseconds. null = no timeout.
     pub fn receiveWithTimeout(self: *NoiseSocket, ws_client: *ws.WebSocketClient, timeout_ms: ?u32) ![]u8 {
-        // Set socket timeout before reading
-        ws_client.setReadTimeout(timeout_ms);
-        defer ws_client.setReadTimeout(null); // Clear timeout after read
         while (true) {
             if (self.frame_decoder.decodeFrame()) |frame_data| {
                 const frame_len = frame_data.len;
@@ -142,6 +139,11 @@ pub const NoiseSocket = struct {
                 };
                 self.frame_decoder.consume(frame_len);
                 return plaintext;
+            }
+
+            if (timeout_ms) |ms| {
+                const ready = try ws_client.waitReadable(ms);
+                if (!ready) return error.Timeout;
             }
 
             const msg = try ws_client.readMessage(self.ws_read_buf) orelse

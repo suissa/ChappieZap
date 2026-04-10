@@ -9,8 +9,8 @@
 
     .dependencies = .{
         .protobuf = .{
-            .url = "git+https://github.com/Arwalk/zig-protobuf?ref=zig-master#7673d62b2909f1ffb687d83a646cded09212b73f",
-            .hash = "protobuf-3.0.0-0e82auyUKACQqyLICPhWm6kJoAru5DNP-idAJMP1W94r",
+            .url = "git+https://github.com/jlucaso1/zig-protobuf?ref=zig-master-cyclic-fix#4cdce57ccdae1f126fe2b0e0d6cc10c66198b0dc",
+            .hash = "protobuf-3.0.0-0e82arObKACzh1DI8F0GnPKbfPti1aiORHLTzTPfgH6q",
         },
     },
     .paths = .{

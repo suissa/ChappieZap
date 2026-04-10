@@ -123,6 +123,8 @@ pub fn build(b: *std.Build) void {
             .{ .name = "binary", .module = binary_mod },
             .{ .name = "signal", .module = signal_mod },
             .{ .name = "prekey", .module = prekey_mod },
+            .{ .name = "protobuf", .module = protobuf_mod },
+            .{ .name = "whatsapp_proto", .module = wa_proto_mod },
         },
     });
 
@@ -197,7 +199,9 @@ pub fn build(b: *std.Build) void {
         .source_files = &.{
             b.path("proto/whatsapp.proto"),
         },
-        .include_directories = &.{},
+        .include_directories = &.{
+            b.path("proto"),
+        },
     });
     gen_proto.dependOn(&protoc_step.step);
 
