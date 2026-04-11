@@ -4,7 +4,6 @@ const keys = @import("keys.zig");
 
 const HmacSha256 = crypto.auth.hmac.sha2.HmacSha256;
 const HkdfSha256 = crypto.kdf.hkdf.HkdfSha256;
-const Aes256 = crypto.core.aes.Aes256;
 
 /// Chain key: produces message keys and steps forward
 pub const ChainKey = struct {

@@ -1,7 +1,6 @@
 const std = @import("std");
 const Io = std.Io;
 const http = std.http;
-const crypto = std.crypto;
 
 const retained_read_capacity = 64 * 1024;
 
@@ -13,7 +12,7 @@ pub const WebSocketClient = struct {
     http_client: *http.Client,
     connection: ?*http.Client.Connection = null,
     custom_ca_loaded: bool = false,
-    write_mask_buf: [4096]u8 = undefined,
+    write_mask_buf: [4096]u8 = [_]u8{0} ** 4096,
 
     const Opcode = enum(u4) {
         continuation = 0,

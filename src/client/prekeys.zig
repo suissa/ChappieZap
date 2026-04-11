@@ -86,6 +86,25 @@ fn fetchPrekeysForJid(self: anytype, jid: []const u8, PumpResult: type) !prekey_
 }
 
 pub fn createSession(self: anytype, jid: []const u8, bundle: prekey_mod.PreKeyBundle, PreKeyMsgParams: type) !PreKeyMsgParams {
+    const created = try buildInitiatorSession(self, bundle);
+    try session_store.storeSession(self, jid, created.session);
+    return .{
+        .registration_id = created.registration_id,
+        .prekey_id = created.prekey_id,
+        .signed_prekey_id = created.signed_prekey_id,
+        .base_key = created.base_key,
+    };
+}
+
+pub const CreatedInitiatorSession = struct {
+    session: signal.Session,
+    registration_id: u32,
+    prekey_id: ?u32,
+    signed_prekey_id: u32,
+    base_key: [32]u8,
+};
+
+pub fn buildInitiatorSession(self: anytype, bundle: prekey_mod.PreKeyBundle) !CreatedInitiatorSession {
     const base_key = signal.KeyPair.generate(self.io);
     const sending_ratchet_key = signal.KeyPair.generate(self.io);
     const x3dh_result = try signal.ratchet.x3dh(
@@ -105,8 +124,8 @@ pub fn createSession(self: anytype, jid: []const u8, bundle: prekey_mod.PreKeyBu
         self.registration_id,
         bundle.registration_id,
     );
-    try session_store.storeSession(self, jid, session);
     return .{
+        .session = session,
         .registration_id = self.registration_id,
         .prekey_id = bundle.prekey_id,
         .signed_prekey_id = bundle.signed_prekey_id,

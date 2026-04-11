@@ -1,8 +1,6 @@
 const std = @import("std");
 const binary = @import("binary");
 const protobuf = @import("protobuf");
-const signal = @import("signal");
-const prekey_mod = @import("prekey");
 const whatsapp = @import("whatsapp_proto");
 const reporting = @import("reporting");
 const fd = protobuf.fd;
@@ -360,8 +358,8 @@ fn pbFindField(data: []const u8, target: u32) ?[]const u8 {
     var pos: usize = 0;
     while (pos < data.len) {
         const tag = pbVarint(data, &pos) orelse return null;
-        const field = @as(u32, @intCast(tag >> 3));
-        const wtype = @as(u3, @intCast(tag & 7));
+        const field: u32 = @intCast(tag >> 3);
+        const wtype: u3 = @intCast(tag & 7);
         if (field == target and wtype == 2) {
             const len: usize = @intCast(pbVarint(data, &pos) orelse return null);
             if (pos + len > data.len) return null;

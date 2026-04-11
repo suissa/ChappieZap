@@ -48,13 +48,11 @@ pub fn sendSelfChatFanout(self: anytype, chat_jid: []const u8, text: []const u8)
         defer resolved.deinit(self.allocator);
         const encryption_jid = resolved.value;
 
-        const had_session = session_store.findSession(self, encryption_jid) != null;
         const payload = try encryptPayloadForFanoutTarget(
             self,
             participant_jid,
             encryption_jid,
             plaintext,
-            had_session,
         );
         errdefer self.allocator.free(payload.ciphertext);
         any_prekey = any_prekey or payload.is_prekey;
@@ -161,13 +159,11 @@ pub fn sendDirectMessageFanout(self: anytype, chat_jid: []const u8, text: []cons
             encryption_jid = resolved.value;
             encryption_jid_owned = resolved.owned;
         }
-        const had_session = session_store.findSession(self, encryption_jid) != null;
         const payload = try encryptPayloadForFanoutTarget(
             self,
             participant_jid,
             encryption_jid,
             recipient_plaintext,
-            had_session,
         );
         errdefer self.allocator.free(payload.ciphertext);
         any_prekey = any_prekey or payload.is_prekey;
@@ -189,13 +185,11 @@ pub fn sendDirectMessageFanout(self: anytype, chat_jid: []const u8, text: []cons
             encryption_jid = resolved.value;
             encryption_jid_owned = resolved.owned;
         }
-        const had_session = session_store.findSession(self, encryption_jid) != null;
         const payload = try encryptPayloadForFanoutTarget(
             self,
             participant_jid,
             encryption_jid,
             own_plaintext,
-            had_session,
         );
         errdefer self.allocator.free(payload.ciphertext);
         any_prekey = any_prekey or payload.is_prekey;
@@ -224,15 +218,66 @@ pub fn sendDirectMessageFanout(self: anytype, chat_jid: []const u8, text: []cons
     try transport.sendNode(self, &msg_node);
 }
 
+pub fn sendDirectMessageSingle(self: anytype, chat_jid: []const u8, text: []const u8) !void {
+    var target_jid = chat_jid;
+    var target_jid_owned: ?[]u8 = null;
+    defer if (target_jid_owned) |owned| self.allocator.free(owned);
+
+    if (self.options.tls) {
+        try ensureRecipientLidMapping(self, chat_jid);
+        const resolved = try self.address_book.resolveEncryptionJid(chat_jid);
+        target_jid = resolved.value;
+        target_jid_owned = resolved.owned;
+    }
+
+    const route_jid = try bareJid(self, target_jid);
+    defer self.allocator.free(route_jid);
+
+    const plaintext = try messaging.encodeTextMessageInto(&self.send_text_buf, self.allocator, text);
+    const payload = try encryptPayloadForFanoutTarget(self, route_jid, target_jid, plaintext);
+    defer {
+        self.allocator.free(payload.ciphertext);
+        if (payload.route_jid_owned) |owned| self.allocator.free(owned);
+    }
+
+    const msg_id_arr = messaging.generateMessageId(self.io);
+    try transport.sendDirectMessageFast(
+        self,
+        chat_jid,
+        payload.route_jid,
+        &msg_id_arr,
+        payload.ciphertext,
+        payload.is_prekey,
+        if (payload.is_prekey) self.account_device_identity else null,
+    );
+}
+
 pub fn encryptPayloadForFanoutTarget(
     self: anytype,
     participant_jid: []const u8,
     encryption_jid: []const u8,
     plaintext: []const u8,
-    had_session: bool,
 ) !EncryptedPayload {
-    if (had_session) {
-        const session = session_store.findSession(self, encryption_jid) orelse return error.NoSession;
+    {
+        var locked = try session_store.lockSession(self, encryption_jid);
+        defer locked.unlock();
+        if (locked.get()) |session| {
+            var encrypted_msg = try session.encrypt(self.allocator, plaintext, self.io);
+            defer encrypted_msg.deinit(self.allocator);
+            return EncryptedPayload{
+                .route_jid = participant_jid,
+                .ciphertext = try signal.message.serializeSignalMessage(self.allocator, &encrypted_msg),
+                .is_prekey = false,
+            };
+        }
+    }
+
+    var fetch = try prekey_flow.fetchPrekeysWithRoute(self, participant_jid, client_pump.PumpResult);
+    errdefer fetch.deinit(self.allocator);
+
+    var locked = try session_store.lockSession(self, encryption_jid);
+    defer locked.unlock();
+    if (locked.get()) |session| {
         var encrypted_msg = try session.encrypt(self.allocator, plaintext, self.io);
         defer encrypted_msg.deinit(self.allocator);
         return EncryptedPayload{
@@ -242,9 +287,9 @@ pub fn encryptPayloadForFanoutTarget(
         };
     }
 
-    var fetch = try prekey_flow.fetchPrekeysWithRoute(self, participant_jid, client_pump.PumpResult);
-    const pk = try prekey_flow.createSession(self, encryption_jid, fetch.bundle, @TypeOf(self.*).PreKeyMsgParams);
-    const session = session_store.findSession(self, encryption_jid) orelse return error.NoSession;
+    const created = try prekey_flow.buildInitiatorSession(self, fetch.bundle);
+    try locked.put(created.session);
+    const session = locked.get() orelse return error.NoSession;
     var encrypted_msg = try session.encrypt(self.allocator, plaintext, self.io);
     defer encrypted_msg.deinit(self.allocator);
     const signal_msg_bytes = try signal.message.serializeSignalMessage(self.allocator, &encrypted_msg);
@@ -258,10 +303,10 @@ pub fn encryptPayloadForFanoutTarget(
         .route_jid_owned = route_jid_owned,
         .ciphertext = try signal.message.serializePreKeySignalMessage(
             self.allocator,
-            pk.registration_id,
-            pk.prekey_id,
-            pk.signed_prekey_id,
-            pk.base_key,
+            created.registration_id,
+            created.prekey_id,
+            created.signed_prekey_id,
+            created.base_key,
             self.identity.key_pair.public,
             signal_msg_bytes,
         ),

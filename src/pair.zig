@@ -349,7 +349,9 @@ test "pairing payload matches rust reference bytes for fixed keys" {
 }
 
 fn makeKeyPair(private: [32]u8) signal.keys.KeyPair {
-    const public = (std.crypto.ecc.Curve25519.basePoint.clampedMul(private) catch unreachable).toBytes();
+    const public = (std.crypto.ecc.Curve25519.basePoint.clampedMul(private) catch |err| {
+        std.debug.panic("Curve25519 test helper key generation failed unexpectedly: {}", .{err});
+    }).toBytes();
     return .{ .public = public, .private = private };
 }
 
@@ -372,7 +374,9 @@ fn signWithRandom(private_key: [32]u8, msg: []const u8, random_bytes: [64]u8) [6
     const Sha512 = std.crypto.hash.sha2.Sha512;
     const xeddsa_prefix = [_]u8{0xFE} ++ ([_]u8{0xFF} ** 31);
 
-    const ed_public = Edwards25519.basePoint.mul(private_key) catch unreachable;
+    const ed_public = Edwards25519.basePoint.mul(private_key) catch |err| {
+        std.debug.panic("XEdDSA test helper public key derivation failed unexpectedly: {}", .{err});
+    };
     const ed_public_bytes = ed_public.toBytes();
     const sign_bit = ed_public_bytes[31] & 0x80;
     const scalar = Scalar.fromBytes(private_key);
@@ -386,7 +390,9 @@ fn signWithRandom(private_key: [32]u8, msg: []const u8, random_bytes: [64]u8) [6
     hash1.final(&digest1);
 
     const r = Scalar.fromBytes64(digest1);
-    const cap_r_point = Edwards25519.basePoint.mul(r.toBytes()) catch unreachable;
+    const cap_r_point = Edwards25519.basePoint.mul(r.toBytes()) catch |err| {
+        std.debug.panic("XEdDSA test helper nonce point derivation failed unexpectedly: {}", .{err});
+    };
     const cap_r = cap_r_point.toBytes();
 
     var hash2 = Sha512.init(.{});

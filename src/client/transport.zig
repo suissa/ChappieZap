@@ -1,11 +1,12 @@
 const std = @import("std");
-const ws = @import("websocket_client");
 const socket_mod = @import("socket");
 const binary = @import("binary");
 const handshake_mod = @import("handshake");
+const messaging = @import("messaging");
 const prekey_mod = @import("prekey");
 const frame_codec = @import("frame_codec.zig");
 const payloads_mod = @import("client_payloads.zig");
+const receipt_mod = @import("receipt.zig");
 const stanza_encode = @import("stanza_encode");
 const stanza_log = @import("stanza_log.zig");
 const unified_session = @import("unified_session.zig");
@@ -73,8 +74,13 @@ pub fn connectWithPayload(self: anytype, mode: ConnectionMode) !void {
 
 pub fn sendActive(self: anytype) void {
     var id_buf: [iq_id_buffer_len]u8 = undefined;
-    const id = nextIqIdInto(self, &id_buf) catch return;
-    sendActiveWithId(self, id) catch {};
+    const id = nextIqIdInto(self, &id_buf) catch |err| {
+        log.warn("Client/Send", "Failed to allocate active IQ id: {}", .{err});
+        return;
+    };
+    sendActiveWithId(self, id) catch |err| {
+        log.warn("Client/Send", "Failed to send active IQ id={s}: {}", .{ id, err });
+    };
 }
 
 pub fn sendActiveAndWait(self: anytype, timeout_ms: u32) !void {
@@ -86,8 +92,13 @@ pub fn sendActiveAndWait(self: anytype, timeout_ms: u32) !void {
 
 pub fn sendKeepalive(self: anytype) void {
     var id_buf: [iq_id_buffer_len]u8 = undefined;
-    const id = nextIqIdInto(self, &id_buf) catch return;
-    sendKeepaliveWithId(self, id) catch {};
+    const id = nextIqIdInto(self, &id_buf) catch |err| {
+        log.warn("Client/Send", "Failed to allocate keepalive IQ id: {}", .{err});
+        return;
+    };
+    sendKeepaliveWithId(self, id) catch |err| {
+        log.warn("Client/Send", "Failed to send keepalive IQ id={s}: {}", .{ id, err });
+    };
 }
 
 pub fn sendPresenceAvailable(self: anytype) !void {
@@ -117,7 +128,13 @@ pub fn sendUnifiedSession(self: anytype) !void {
 }
 
 pub fn sendIqResult(self: anytype, id: ?[]const u8, to: []const u8) void {
-    sendIqResultDirect(self, id, to) catch {};
+    sendIqResultDirect(self, id, to) catch |err| {
+        log.warn("Client/Send", "Failed to send IQ result to={s} id={s}: {}", .{
+            to,
+            id orelse "",
+            err,
+        });
+    };
 }
 
 pub fn nextIqId(self: anytype) ![]u8 {
@@ -278,7 +295,45 @@ pub fn sendEncodedNode(self: anytype, encoded: []const u8) !void {
 pub fn sendAck(self: anytype, node: *const binary.Node) !void {
     var encode_buf: [256]u8 = undefined;
     var writer = binary.BinaryWriter.init(&encode_buf);
-    try encodeAck(&writer, node);
+    try encodeAck(self, &writer, node);
+    try sendEncodedNode(self, writer.getWritten());
+}
+
+pub fn sendDeliveryReceipt(self: anytype, node: *const binary.Node) !void {
+    var encode_buf: [256]u8 = undefined;
+    var writer = binary.BinaryWriter.init(&encode_buf);
+    const attrs = receipt_mod.deliveryReceiptAttrs(&self.address_book, node) orelse return error.NoDeliveryReceipt;
+    try encodeDeliveryReceipt(&writer, attrs);
+    try sendEncodedNode(self, writer.getWritten());
+}
+
+pub fn sendDirectMessageFast(
+    self: anytype,
+    chat_jid: []const u8,
+    participant_jid: []const u8,
+    msg_id: []const u8,
+    ciphertext: []const u8,
+    is_prekey_msg: bool,
+    device_identity_bytes: ?[]const u8,
+) !void {
+    var encode_buf: [65536]u8 = undefined;
+    var writer = binary.BinaryWriter.init(&encode_buf);
+    try encodeDirectMessage(
+        &writer,
+        chat_jid,
+        participant_jid,
+        msg_id,
+        ciphertext,
+        is_prekey_msg,
+        device_identity_bytes,
+    );
+    if (log.enabled(.debug)) {
+        log.debug("Client/Send", "<message to=\"{s}\" id=\"{s}\" type=\"text\"><!-- direct encoded {d} bytes --></message>", .{
+            chat_jid,
+            msg_id,
+            writer.getWritten().len,
+        });
+    }
     try sendEncodedNode(self, writer.getWritten());
 }
 
@@ -346,14 +401,17 @@ fn encodeKeepaliveIq(
 }
 
 fn encodeAck(
+    self: anytype,
     writer: *binary.BinaryWriter,
     node: *const binary.Node,
 ) (binary.BinaryError || error{ MissingId, MissingFrom })!void {
     const include_participant = node.getAttribute("participant") != null;
+    const include_from = std.mem.eql(u8, node.tag, "message") and self.address_book.phoneJid() != null;
     const include_type = !std.mem.eql(u8, node.tag, "message") and
         !isEncryptIdentityNotification(node) and
         node.getAttribute("type") != null;
     const attr_count: usize = 3 +
+        @as(usize, @intFromBool(include_from)) +
         @as(usize, @intFromBool(include_participant)) +
         @as(usize, @intFromBool(include_type));
 
@@ -361,11 +419,88 @@ fn encodeAck(
     try stanza_encode.writeAttribute(writer, "class", node.tag);
     try stanza_encode.writeAttribute(writer, "id", node.getAttribute("id") orelse return error.MissingId);
     try stanza_encode.writeAttribute(writer, "to", node.getAttribute("from") orelse return error.MissingFrom);
+    if (include_from) {
+        try stanza_encode.writeAttribute(writer, "from", self.address_book.phoneJid().?);
+    }
     if (include_participant) {
         try stanza_encode.writeAttribute(writer, "participant", node.getAttribute("participant").?);
     }
     if (include_type) {
         try stanza_encode.writeAttribute(writer, "type", node.getAttribute("type").?);
+    }
+}
+
+fn encodeDeliveryReceipt(
+    writer: *binary.BinaryWriter,
+    attrs: receipt_mod.DeliveryReceiptAttrs,
+) binary.BinaryError!void {
+    const attr_count: usize = 2 +
+        @as(usize, @intFromBool(attrs.kind == .peer_msg)) +
+        @as(usize, @intFromBool(attrs.participant != null));
+
+    try stanza_encode.writeNodeHeader(writer, "receipt", attr_count, false);
+    try stanza_encode.writeAttribute(writer, "id", attrs.id);
+    try stanza_encode.writeAttribute(writer, "to", attrs.to);
+    if (attrs.kind == .peer_msg) {
+        try stanza_encode.writeAttribute(writer, "type", "peer_msg");
+    }
+    if (attrs.participant) |participant| {
+        try stanza_encode.writeAttribute(writer, "participant", participant);
+    }
+}
+
+fn encodeDirectMessage(
+    writer: *binary.BinaryWriter,
+    chat_jid: []const u8,
+    participant_jid: []const u8,
+    msg_id: []const u8,
+    ciphertext: []const u8,
+    is_prekey_msg: bool,
+    device_identity_bytes: ?[]const u8,
+) binary.BinaryError!void {
+    const child_count: usize = 1 + @as(usize, @intFromBool(is_prekey_msg and device_identity_bytes != null));
+    try stanza_encode.writeNodeHeader(writer, "message", 3, true);
+    try stanza_encode.writeAttribute(writer, "to", chat_jid);
+    try stanza_encode.writeAttribute(writer, "id", msg_id);
+    try stanza_encode.writeAttribute(writer, "type", "text");
+
+    try stanza_encode.writeListHeader(writer, child_count);
+    try stanza_encode.writeNodeHeader(writer, "participants", 0, true);
+    try stanza_encode.writeListHeader(writer, 1);
+    try stanza_encode.writeNodeHeader(writer, "to", 1, true);
+    try stanza_encode.writeAttribute(writer, "jid", participant_jid);
+    try stanza_encode.writeListHeader(writer, 1);
+    try stanza_encode.writeNodeHeader(writer, "enc", 2, true);
+    try stanza_encode.writeAttribute(writer, "v", "2");
+    try stanza_encode.writeAttribute(writer, "type", if (is_prekey_msg) "pkmsg" else "msg");
+    try writeBinaryNodeContent(writer, ciphertext);
+
+    if (is_prekey_msg) {
+        if (device_identity_bytes) |bytes| {
+            try stanza_encode.writeNodeHeader(writer, "device-identity", 0, true);
+            try writeBinaryNodeContent(writer, bytes);
+        }
+    }
+}
+
+fn writeBinaryNodeContent(writer: *binary.BinaryWriter, bytes: []const u8) binary.BinaryError!void {
+    if (bytes.len < 256) {
+        try writer.writeByte(binary.BINARY_8);
+        try writer.writeByte(@intCast(bytes.len));
+        try writer.writeBytes(bytes);
+    } else if (bytes.len < (1 << 20)) {
+        try writer.writeByte(binary.BINARY_20);
+        try writer.writeByte(@intCast((bytes.len >> 16) & 0xFF));
+        try writer.writeByte(@intCast((bytes.len >> 8) & 0xFF));
+        try writer.writeByte(@intCast(bytes.len & 0xFF));
+        try writer.writeBytes(bytes);
+    } else {
+        try writer.writeByte(binary.BINARY_32);
+        try writer.writeByte(@intCast(bytes.len >> 24));
+        try writer.writeByte(@intCast((bytes.len >> 16) & 0xFF));
+        try writer.writeByte(@intCast((bytes.len >> 8) & 0xFF));
+        try writer.writeByte(@intCast(bytes.len & 0xFF));
+        try writer.writeBytes(bytes);
     }
 }
 
@@ -435,19 +570,91 @@ test "encodeAck matches node encoder" {
 
     var fast_buf: [256]u8 = undefined;
     var fast_writer = binary.BinaryWriter.init(&fast_buf);
-    try encodeAck(&fast_writer, &incoming);
+    var fake = struct {
+        address_book: struct {
+            fn phoneJid(_: @This()) ?[]const u8 {
+                return "559980000003@s.whatsapp.net";
+            }
+        } = .{},
+    }{};
+    try encodeAck(&fake, &fast_writer, &incoming);
 
     var ack = binary.Node.initBorrowed(allocator, "ack");
     defer ack.deinit();
     try ack.addAttributeBorrowed("class", incoming.tag);
     try ack.addAttributeBorrowed("id", incoming.getAttribute("id").?);
     try ack.addAttributeBorrowed("to", incoming.getAttribute("from").?);
+    try ack.addAttributeBorrowed("from", "559980000003@s.whatsapp.net");
     try ack.addAttributeBorrowed("participant", incoming.getAttribute("participant").?);
     try ack.addAttributeBorrowed("type", incoming.getAttribute("type").?);
 
     var slow_buf: [256]u8 = undefined;
     var slow_writer = binary.BinaryWriter.init(&slow_buf);
     _ = try binary.encodeNode(&ack, &slow_writer);
+
+    try std.testing.expectEqualSlices(u8, slow_writer.getWritten(), fast_writer.getWritten());
+}
+
+test "encodeDeliveryReceipt matches node encoder" {
+    const allocator = std.testing.allocator;
+
+    var book = @import("addressing").AddressBook.init(allocator);
+    defer book.deinit();
+
+    var incoming = try binary.Node.init(allocator, "message");
+    defer incoming.deinit();
+    try incoming.addAttribute("id", "MSG1");
+    try incoming.addAttribute("from", "120363161500776365@g.us");
+    try incoming.addAttribute("participant", "2439742808066@lid");
+
+    const attrs = receipt_mod.deliveryReceiptAttrs(&book, &incoming).?;
+
+    var fast_buf: [256]u8 = undefined;
+    var fast_writer = binary.BinaryWriter.init(&fast_buf);
+    try encodeDeliveryReceipt(&fast_writer, attrs);
+
+    var slow_node = try receipt_mod.buildDeliveryReceiptNode(allocator, &book, &incoming);
+    defer slow_node.deinit();
+
+    var slow_buf: [256]u8 = undefined;
+    var slow_writer = binary.BinaryWriter.init(&slow_buf);
+    _ = try binary.encodeNode(&slow_node, &slow_writer);
+
+    try std.testing.expectEqualSlices(u8, slow_writer.getWritten(), fast_writer.getWritten());
+}
+
+test "encodeDirectMessage matches node encoder" {
+    const allocator = std.testing.allocator;
+
+    const ciphertext = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    const device_identity = [_]u8{ 0x05, 0x06, 0x07 };
+
+    var fast_buf: [256]u8 = undefined;
+    var fast_writer = binary.BinaryWriter.init(&fast_buf);
+    try encodeDirectMessage(
+        &fast_writer,
+        "55198060305580@s.whatsapp.net",
+        "55198060305580@s.whatsapp.net",
+        "3EB0ABC",
+        &ciphertext,
+        true,
+        &device_identity,
+    );
+
+    var slow_node = try messaging.buildMessageNode(
+        allocator,
+        "55198060305580@s.whatsapp.net",
+        "55198060305580@s.whatsapp.net",
+        "3EB0ABC",
+        &ciphertext,
+        true,
+        &device_identity,
+    );
+    defer slow_node.deinit();
+
+    var slow_buf: [256]u8 = undefined;
+    var slow_writer = binary.BinaryWriter.init(&slow_buf);
+    _ = try binary.encodeNode(&slow_node, &slow_writer);
 
     try std.testing.expectEqualSlices(u8, slow_writer.getWritten(), fast_writer.getWritten());
 }

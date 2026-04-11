@@ -23,7 +23,9 @@ pub const KeyPair = struct {
         private[31] &= 0x7F;
         private[31] |= 0x40;
 
-        const public_point = crypto.ecc.Curve25519.basePoint.clampedMul(private) catch unreachable;
+        const public_point = crypto.ecc.Curve25519.basePoint.clampedMul(private) catch |err| {
+            std.debug.panic("Curve25519 key generation failed unexpectedly: {}", .{err});
+        };
         return .{
             .public = public_point.toBytes(),
             .private = private,
@@ -106,7 +108,9 @@ fn serializeDjbPublicKey(public: [32]u8) [33]u8 {
 
 fn xeddsaSignWithRandom(private_key: [32]u8, msg: []const u8, random_bytes: [64]u8) [64]u8 {
     const scalar = Scalar.fromBytes(private_key);
-    const ed_public = Edwards25519.basePoint.mulPublic(scalar.toBytes()) catch unreachable;
+    const ed_public = Edwards25519.basePoint.mulPublic(scalar.toBytes()) catch |err| {
+        std.debug.panic("XEdDSA public key derivation failed unexpectedly: {}", .{err});
+    };
     const ed_public_bytes = ed_public.toBytes();
     const sign_bit = ed_public_bytes[31] & 0x80;
 
@@ -120,7 +124,9 @@ fn xeddsaSignWithRandom(private_key: [32]u8, msg: []const u8, random_bytes: [64]
 
     const r_bytes = Edwards25519.scalar.reduce64(digest1);
     const r = Scalar.fromBytes(r_bytes);
-    const cap_r_point = Edwards25519.basePoint.mulPublic(r_bytes) catch unreachable;
+    const cap_r_point = Edwards25519.basePoint.mulPublic(r_bytes) catch |err| {
+        std.debug.panic("XEdDSA nonce point derivation failed unexpectedly: {}", .{err});
+    };
     const cap_r = cap_r_point.toBytes();
 
     var hash2 = Sha512.init(.{});

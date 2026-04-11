@@ -60,8 +60,11 @@ pub fn readUntilLogin(self: anytype) !void {
                     unified_session.nowMillis(client.io),
                 );
                 if (node.getAttribute("lid")) |lid| {
-                    client.address_book.setOwnLid(lid) catch {};
-                    session_store.syncIdentityAliases(client);
+                    if (client.address_book.setOwnLid(lid)) {
+                        session_store.syncIdentityAliases(client);
+                    } else |err| {
+                        log.warn("Client/Auth", "Failed to record own lid {s}: {}", .{ lid, err });
+                    }
                 }
                 return .done;
             }

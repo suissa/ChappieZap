@@ -1,6 +1,7 @@
 const std = @import("std");
 const binary = @import("binary");
 const keepalive = @import("keepalive.zig");
+const stanza_processor = @import("stanza_processor.zig");
 const transport = @import("transport.zig");
 const unified_session = @import("unified_session.zig");
 
@@ -37,8 +38,15 @@ pub fn waitForMessage(self: anytype, expected: anytype, timeout_ms: u32) !void {
     var state = expected;
     return pumpUntil(self, timeout_ms, struct {
         fn onNode(client: @TypeOf(self), ctx: *@TypeOf(state), node: *binary.Node) !PumpResult {
-            client.processNode(node);
-            if (ctx.matches(client)) return .done;
+            if (std.mem.eql(u8, node.tag, "message")) {
+                var processed = stanza_processor.processMessageNode(client, node);
+                defer processed.deinit(client.allocator);
+                if (ctx.matchesNode(client, node, processed.body)) {
+                    return .done;
+                }
+            } else {
+                client.processNode(node);
+            }
             return .keep_going;
         }
     }.onNode, &state, error.TextNotFound);
@@ -49,7 +57,8 @@ pub fn waitForReceiptFrom(self: anytype, expected_from: []const u8, timeout_ms: 
     return pumpUntil(self, timeout_ms, struct {
         fn onNode(client: @TypeOf(self), ctx: *const []const u8, node: *binary.Node) !PumpResult {
             client.processNode(node);
-            if (client._last_receipt_from) |from| {
+            if (std.mem.eql(u8, node.tag, "receipt")) {
+                const from = node.getAttribute("from") orelse return .keep_going;
                 if (std.mem.eql(u8, from, ctx.*)) return .done;
             }
             return .keep_going;

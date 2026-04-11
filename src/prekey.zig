@@ -110,24 +110,35 @@ pub const PreKeyBundle = struct {
 pub fn parsePreKeyBundle(user_node: *const binary.Node) !PreKeyBundle {
     var bundle = PreKeyBundle{
         .registration_id = 0,
-        .identity_key = undefined,
+        .identity_key = [_]u8{0} ** 32,
         .signed_prekey_id = 0,
-        .signed_prekey_public = undefined,
-        .signed_prekey_signature = undefined,
+        .signed_prekey_public = [_]u8{0} ** 32,
+        .signed_prekey_signature = [_]u8{0} ** 64,
         .prekey_id = null,
         .prekey_public = null,
     };
+    var saw_registration_id = false;
+    var saw_identity_key = false;
+    var saw_signed_prekey_id = false;
+    var saw_signed_prekey_public = false;
+    var saw_signed_prekey_signature = false;
 
     const children = user_node.getContentNodes() orelse return error.EmptyBundle;
 
     for (children) |*child| {
         if (std.mem.eql(u8, child.tag, "registration")) {
             if (child.getContentBytes()) |bytes| {
-                if (bytes.len >= 4) bundle.registration_id = std.mem.readInt(u32, bytes[0..4], .big);
+                if (bytes.len >= 4) {
+                    bundle.registration_id = std.mem.readInt(u32, bytes[0..4], .big);
+                    saw_registration_id = true;
+                }
             }
         } else if (std.mem.eql(u8, child.tag, "identity")) {
             if (child.getContentBytes()) |bytes| {
-                if (bytes.len >= 32) bundle.identity_key = bytes[0..32].*;
+                if (bytes.len >= 32) {
+                    bundle.identity_key = bytes[0..32].*;
+                    saw_identity_key = true;
+                }
             }
         } else if (std.mem.eql(u8, child.tag, "skey")) {
             if (child.getContentNodes()) |skey_children| {
@@ -135,14 +146,21 @@ pub fn parsePreKeyBundle(user_node: *const binary.Node) !PreKeyBundle {
                     if (std.mem.eql(u8, sc.tag, "id")) {
                         if (sc.getContentBytes()) |bytes| {
                             bundle.signed_prekey_id = decodePreKeyId(bytes);
+                            saw_signed_prekey_id = true;
                         }
                     } else if (std.mem.eql(u8, sc.tag, "value")) {
                         if (sc.getContentBytes()) |bytes| {
-                            if (bytes.len >= 32) bundle.signed_prekey_public = bytes[0..32].*;
+                            if (bytes.len >= 32) {
+                                bundle.signed_prekey_public = bytes[0..32].*;
+                                saw_signed_prekey_public = true;
+                            }
                         }
                     } else if (std.mem.eql(u8, sc.tag, "signature")) {
                         if (sc.getContentBytes()) |bytes| {
-                            if (bytes.len >= 64) bundle.signed_prekey_signature = bytes[0..64].*;
+                            if (bytes.len >= 64) {
+                                bundle.signed_prekey_signature = bytes[0..64].*;
+                                saw_signed_prekey_signature = true;
+                            }
                         }
                     }
                 }
@@ -164,6 +182,9 @@ pub fn parsePreKeyBundle(user_node: *const binary.Node) !PreKeyBundle {
         }
     }
 
+    if (!saw_registration_id or !saw_identity_key or !saw_signed_prekey_id or !saw_signed_prekey_public or !saw_signed_prekey_signature) {
+        return error.IncompletePreKeyBundle;
+    }
     return bundle;
 }
 

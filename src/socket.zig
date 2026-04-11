@@ -230,7 +230,9 @@ fn allocHexPreview(allocator: std.mem.Allocator, bytes: []const u8, max_bytes: u
     const out = try allocator.alloc(u8, preview_len * 2 + suffix.len);
 
     for (bytes[0..preview_len], 0..) |b, i| {
-        _ = std.fmt.bufPrint(out[i * 2 ..][0..2], "{x:0>2}", .{b}) catch unreachable;
+        _ = std.fmt.bufPrint(out[i * 2 ..][0..2], "{x:0>2}", .{b}) catch {
+            @panic("allocHexPreview buffer too small");
+        };
     }
     if (suffix.len != 0) @memcpy(out[preview_len * 2 ..], suffix);
     return out;

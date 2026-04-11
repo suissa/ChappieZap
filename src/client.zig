@@ -4,13 +4,10 @@ const xed25519 = @import("xed25519");
 const socket_mod = @import("socket");
 const binary = @import("binary");
 const signal = @import("signal");
-const prekey_mod = @import("prekey");
 const messaging = @import("messaging");
-const whatsapp = @import("whatsapp_proto");
 const events = @import("events");
 const addressing = @import("addressing");
 const auth_flow = @import("client/auth.zig");
-const decrypt_flow = @import("client/decrypt.zig");
 const payloads_mod = @import("client/client_payloads.zig");
 const event_pump = @import("client/pump.zig");
 const prekey_flow = @import("client/prekeys.zig");
@@ -19,7 +16,6 @@ const stanza_processor = @import("client/stanza_processor.zig");
 const send_fanout = @import("client/send_fanout.zig");
 const session_store = @import("client/session_store.zig");
 const wire_transport = @import("client/transport.zig");
-const unified_session = @import("client/unified_session.zig");
 const log = @import("log");
 
 pub const Event = events.Event;
@@ -49,7 +45,7 @@ pub const Client = struct {
     static_keypair: xed25519.XEd25519.KeyPair,
     iq_counter: u32 = 0,
     request_id_prefix_len: u8 = 0,
-    request_id_prefix: [24]u8 = undefined,
+    request_id_prefix: [24]u8 = [_]u8{0} ** 24,
     is_logged_in: bool = false,
     address_book: addressing.AddressBook,
     lid: ?[]u8 = null,
@@ -63,7 +59,7 @@ pub const Client = struct {
     adv_secret_key: [32]u8,
     app_version: AppVersion = .{},
     account_device_identity: ?[]u8 = null,
-    sessions: std.StringHashMap(signal.Session),
+    session_shards: [session_store.session_shard_count]session_store.SessionShard,
     send_text_buf: std.ArrayList(u8),
     send_text_aux_buf: std.ArrayList(u8),
     send_pack_buf: std.ArrayList(u8),
@@ -71,12 +67,6 @@ pub const Client = struct {
     last_data_sent_at: std.Io.Timestamp = .zero,
     last_data_received_at: std.Io.Timestamp = .zero,
     server_time_offset_ms: i64 = 0,
-    _last_msg_from: ?[]u8 = null,
-    _last_msg_chat: ?[]u8 = null,
-    _last_msg_id: ?[]u8 = null,
-    _last_msg_text: ?[]u8 = null,
-    _last_msg_decrypted: bool = false,
-    _last_receipt_from: ?[]u8 = null,
 
     const AppVersion = struct {
         primary: u32 = 2,
@@ -100,29 +90,29 @@ pub const Client = struct {
         body_contains: ?[]const u8 = null,
         require_decrypted: ?bool = null,
 
-        pub fn matches(self: MessageWait, client: *const Client) bool {
+        pub fn matchesNode(self: MessageWait, client: *const Client, node: *const binary.Node, body: ?[]const u8) bool {
             if (self.from) |expected| {
-                const actual = client._last_msg_from orelse return false;
+                const actual = node.getAttribute("from") orelse return false;
                 if (!std.mem.eql(u8, actual, expected)) return false;
             }
             if (self.chat) |expected| {
-                const actual = client._last_msg_chat orelse return false;
+                const actual = stanza_processor.messageChatJidForMatch(client, node);
                 if (!std.mem.eql(u8, actual, expected)) return false;
             }
             if (self.id) |expected| {
-                const actual = client._last_msg_id orelse return false;
+                const actual = node.getAttribute("id") orelse return false;
                 if (!std.mem.eql(u8, actual, expected)) return false;
             }
             if (self.body_equals) |expected| {
-                const actual = client._last_msg_text orelse return false;
+                const actual = body orelse return false;
                 if (!std.mem.eql(u8, actual, expected)) return false;
             }
             if (self.body_contains) |expected| {
-                const actual = client._last_msg_text orelse return false;
+                const actual = body orelse return false;
                 if (std.mem.indexOf(u8, actual, expected) == null) return false;
             }
             if (self.require_decrypted) |expected| {
-                if (client._last_msg_decrypted != expected) return false;
+                if ((body != null) != expected) return false;
             }
             return true;
         }
@@ -158,7 +148,7 @@ pub const Client = struct {
             .prekeys = prekeys,
             .registration_id = signal.keys.generateRegistrationId(io),
             .adv_secret_key = adv_secret,
-            .sessions = std.StringHashMap(signal.Session).init(allocator),
+            .session_shards = session_store.initSessionShards(allocator),
             .send_text_buf = .empty,
             .send_text_aux_buf = .empty,
             .send_pack_buf = .empty,
@@ -167,18 +157,8 @@ pub const Client = struct {
     }
 
     pub fn deinit(self: *Client) void {
-        if (self._last_receipt_from) |from| self.allocator.free(from);
-        if (self._last_msg_from) |from| self.allocator.free(from);
-        if (self._last_msg_chat) |chat| self.allocator.free(chat);
-        if (self._last_msg_id) |id| self.allocator.free(id);
-        if (self._last_msg_text) |t| self.allocator.free(t);
         if (self.account_device_identity) |bytes| self.allocator.free(bytes);
-        var sessions_it = self.sessions.iterator();
-        while (sessions_it.next()) |entry| {
-            entry.value_ptr.deinit();
-            self.allocator.free(entry.key_ptr.*);
-        }
-        self.sessions.deinit();
+        session_store.deinitSessionShards(&self.session_shards, self.allocator);
         self.send_text_buf.deinit(self.allocator);
         self.send_text_aux_buf.deinit(self.allocator);
         self.send_pack_buf.deinit(self.allocator);
@@ -186,6 +166,27 @@ pub const Client = struct {
         self.address_book.deinit();
         if (self.noise_socket) |*ns| ns.deinit();
         self.ws_client.deinit();
+    }
+
+    fn runExperimentalPostLoginBootstrap(self: *Client) void {
+        if (!self.options.experimental_post_login_init) return;
+
+        wire_transport.sendUnifiedSession(self) catch |err| {
+            log.warn("Client", "Experimental post-login unified session failed: {}", .{err});
+        };
+        if (self.options.tls) {
+            bootstrap.syncOwnDeviceList(self) catch |err| {
+                log.warn("Client", "Experimental own-device sync failed: {}", .{err});
+            };
+        }
+    }
+
+    fn runExperimentalPostLoginPresence(self: *Client) void {
+        if (!self.options.experimental_post_login_init) return;
+
+        wire_transport.sendPresenceAvailable(self) catch |err| {
+            log.warn("Client", "Experimental presence available failed: {}", .{err});
+        };
     }
 
     // --- Public API ---
@@ -197,19 +198,14 @@ pub const Client = struct {
         try auth_flow.handlePairingFlow(self);
         try wire_transport.connectWithPayload(self, .login);
         try auth_flow.readUntilLogin(self);
-        if (self.options.experimental_post_login_init) {
-            wire_transport.sendUnifiedSession(self) catch {};
-            if (self.options.tls) bootstrap.syncOwnDeviceList(self) catch {};
-        }
+        self.runExperimentalPostLoginBootstrap();
         wire_transport.uploadPrekeysAndWait(self, 10_000) catch |err| {
             log.warn("Client", "Post-login prekey upload did not confirm: {}", .{err});
         };
         wire_transport.sendActiveAndWait(self, 10_000) catch |err| {
             log.warn("Client", "Post-login active IQ did not confirm: {}", .{err});
         };
-        if (self.options.experimental_post_login_init) {
-            wire_transport.sendPresenceAvailable(self) catch {};
-        }
+        self.runExperimentalPostLoginPresence();
 
         self.emit(.{ .connected = .{
             .phone_jid = self.phone_jid orelse "",
@@ -226,19 +222,14 @@ pub const Client = struct {
         try auth_flow.handlePairingFlow(self);
         try wire_transport.connectWithPayload(self, .login);
         try auth_flow.readUntilLogin(self);
-        if (self.options.experimental_post_login_init) {
-            wire_transport.sendUnifiedSession(self) catch {};
-            if (self.options.tls) bootstrap.syncOwnDeviceList(self) catch {};
-        }
+        self.runExperimentalPostLoginBootstrap();
         wire_transport.uploadPrekeysAndWait(self, 10_000) catch |err| {
             log.warn("Client", "Post-login prekey upload did not confirm: {}", .{err});
         };
         wire_transport.sendActiveAndWait(self, 10_000) catch |err| {
             log.warn("Client", "Post-login active IQ did not confirm: {}", .{err});
         };
-        if (self.options.experimental_post_login_init) {
-            wire_transport.sendPresenceAvailable(self) catch {};
-        }
+        self.runExperimentalPostLoginPresence();
     }
 
     /// Send a text message to a JID. Handles session management automatically:
@@ -248,6 +239,15 @@ pub const Client = struct {
             return send_fanout.sendSelfChatFanout(self, to_jid, text);
         }
         return send_fanout.sendDirectMessageFanout(self, to_jid, text);
+    }
+
+    /// Send a direct text message through a single-recipient path.
+    /// This avoids fanout/reporting overhead and is intended for hot reply paths.
+    pub fn sendMessageFast(self: *Client, to_jid: []const u8, text: []const u8) !void {
+        if (self.address_book.isSelfChatJid(to_jid) or std.mem.endsWith(u8, to_jid, "@g.us")) {
+            return self.sendMessage(to_jid, text);
+        }
+        return send_fanout.sendDirectMessageSingle(self, to_jid, text);
     }
 
     /// Wait for an incoming message containing the expected text.
@@ -293,7 +293,9 @@ pub const Client = struct {
         text: []const u8,
         prekey_params: ?PreKeyMsgParams,
     ) !void {
-        const session = session_store.findSession(self, encryption_jid) orelse return error.NoSession;
+        var locked = try session_store.lockSession(self, encryption_jid);
+        defer locked.unlock();
+        const session = locked.get() orelse return error.NoSession;
         const plaintext = if (self.address_book.isSelfChatJid(chat_jid))
             try messaging.encodeDeviceSentTextMessageInto(&self.send_text_buf, self.allocator, chat_jid, text)
         else
@@ -327,42 +329,6 @@ pub const Client = struct {
         );
         defer msg_node.deinit();
         try wire_transport.sendNode(self, &msg_node);
-    }
-
-    pub const EncryptedPayload = struct {
-        ciphertext: []u8,
-        is_prekey: bool,
-    };
-
-    fn encryptPayloadForJid(
-        self: *Client,
-        target_jid: []const u8,
-        plaintext: []const u8,
-    ) !EncryptedPayload {
-        const session = session_store.findSession(self, target_jid) orelse blk: {
-            const bundle = try prekey_flow.fetchPrekeys(self, target_jid, PumpResult);
-            _ = try prekey_flow.createSession(self, target_jid, bundle, PreKeyMsgParams);
-            break :blk session_store.findSession(self, target_jid) orelse return error.NoSession;
-        };
-
-        var encrypted_msg = try session.encrypt(self.allocator, plaintext, self.io);
-        defer encrypted_msg.deinit(self.allocator);
-        const signal_msg_bytes = try signal.message.serializeSignalMessage(self.allocator, &encrypted_msg);
-
-        if (session.remote_registration_id == 0) return error.InvalidRemoteRegistrationId;
-
-        if (session_store.findSession(self, target_jid) == null) unreachable;
-
-        // If we had to create the session in this call, it must be sent as a prekey message.
-        if (session.previous_counter == 0 and session.their_ratchet_key != null and session.sending_chain != null and session.receiving_chain != null and session.remote_registration_id != 0) {
-            // Heuristic is not reliable enough; fall back to checking whether a session
-            // existed before this call by looking up again before creation at call sites.
-        }
-
-        return .{
-            .ciphertext = signal_msg_bytes,
-            .is_prekey = false,
-        };
     }
 
     // --- Internal: Helpers ---

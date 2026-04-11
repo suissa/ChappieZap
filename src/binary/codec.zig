@@ -196,7 +196,7 @@ pub fn encodeNibble(str: []const u8, writer: *BinaryWriter) BinaryError!usize {
     total_bytes += 1;
 
     const packed_len = (str.len + 1) / 2;
-    var length_byte: u8 = @as(u8, @intCast(packed_len));
+    var length_byte: u8 = @intCast(packed_len);
     if (str.len % 2 == 1) length_byte |= 0x80;
 
     try writer.writeByte(length_byte);
@@ -257,7 +257,7 @@ pub fn encodeHex(str: []const u8, writer: *BinaryWriter) BinaryError!usize {
     total_bytes += 1;
 
     const packed_len = (str.len + 1) / 2;
-    var length_byte: u8 = @as(u8, @intCast(packed_len));
+    var length_byte: u8 = @intCast(packed_len);
     if (str.len % 2 == 1) length_byte |= 0x80;
 
     try writer.writeByte(length_byte);

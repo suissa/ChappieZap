@@ -59,6 +59,35 @@ pub fn encodeFrameInto(
     @memcpy(frame[offset..][0..payload.len], payload);
 }
 
+pub fn appendFrameInto(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+    header: ?[]const u8,
+) !void {
+    if (payload.len >= FRAME_MAX_SIZE) return error.FrameTooLarge;
+
+    const header_len = if (header) |h| h.len else 0;
+    const total = header_len + FRAME_LENGTH_SIZE + payload.len;
+
+    try out.ensureUnusedCapacity(allocator, total);
+    const frame = try out.addManyAsSlice(allocator, total);
+    var offset: usize = 0;
+
+    if (header) |h| {
+        @memcpy(frame[0..h.len], h);
+        offset = h.len;
+    }
+
+    const len_bytes = std.mem.toBytes(std.mem.nativeToBig(u32, @intCast(payload.len)));
+    frame[offset] = len_bytes[1];
+    frame[offset + 1] = len_bytes[2];
+    frame[offset + 2] = len_bytes[3];
+    offset += 3;
+
+    @memcpy(frame[offset..][0..payload.len], payload);
+}
+
 /// Streaming frame decoder — accumulates bytes and extracts complete frames.
 pub const FrameDecoder = struct {
     buffer: std.ArrayList(u8),

@@ -54,7 +54,9 @@ pub fn buildIqResultNode(
 pub fn shortHex(bytes: []const u8) [16]u8 {
     var out: [16]u8 = undefined;
     for (bytes, 0..) |b, i| {
-        _ = std.fmt.bufPrint(out[i * 2 ..][0..2], "{x:0>2}", .{b}) catch unreachable;
+        _ = std.fmt.bufPrint(out[i * 2 ..][0..2], "{x:0>2}", .{b}) catch {
+            @panic("shortHex buffer too small");
+        };
     }
     return out;
 }
@@ -62,7 +64,9 @@ pub fn shortHex(bytes: []const u8) [16]u8 {
 pub fn allocHex(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
     const out = try allocator.alloc(u8, bytes.len * 2);
     for (bytes, 0..) |b, i| {
-        _ = std.fmt.bufPrint(out[i * 2 ..][0..2], "{x:0>2}", .{b}) catch unreachable;
+        _ = std.fmt.bufPrint(out[i * 2 ..][0..2], "{x:0>2}", .{b}) catch {
+            @panic("allocHex buffer too small");
+        };
     }
     return out;
 }

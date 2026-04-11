@@ -52,6 +52,7 @@ pub fn fetchLatestAppVersion(comptime AppVersion: type, allocator: std.mem.Alloc
     defer body_writer.deinit();
     var transfer_buf: [4096]u8 = undefined;
     var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
+    // SAFETY: `readerDecompressing` initializes and manages this scratch state before it is read.
     var decompress: http.Decompress = undefined;
     var body_reader = response.readerDecompressing(&transfer_buf, &decompress, &decompress_buf);
     _ = try body_reader.streamRemaining(&body_writer.writer);

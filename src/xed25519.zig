@@ -33,12 +33,16 @@ pub const XEd25519 = struct {
 
         /// Sign a message using Ed25519
         pub fn sign(keypair: KeyPair, message: []const u8) [64]u8 {
-            const public_key = crypto.sign.Ed25519.PublicKey.fromBytes(keypair.ed25519_public) catch unreachable;
+            const public_key = crypto.sign.Ed25519.PublicKey.fromBytes(keypair.ed25519_public) catch |err| {
+                std.debug.panic("XEd25519.sign invalid cached public key: {}", .{err});
+            };
             const ed25519_keypair = crypto.sign.Ed25519.KeyPair{
                 .public_key = public_key,
                 .secret_key = keypair.ed25519_private,
             };
-            const signature = ed25519_keypair.sign(message, null) catch unreachable;
+            const signature = ed25519_keypair.sign(message, null) catch |err| {
+                std.debug.panic("XEd25519.sign failed unexpectedly: {}", .{err});
+            };
             return signature.toBytes();
         }
 

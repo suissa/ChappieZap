@@ -133,58 +133,77 @@ pub const Session = struct {
         };
     }
 
-    /// Decrypt a message using this session
-    pub fn decrypt(self: *Session, allocator: std.mem.Allocator, msg: *const EncryptedMessage, io: std.Io) ![]u8 {
-        // Check if we need to DH ratchet (new ratchet key from sender)
-        const need_ratchet = self.their_ratchet_key == null or
-            !std.mem.eql(u8, &(self.their_ratchet_key.?), &msg.ratchet_key);
+    /// Decrypt a message using this session.
+    /// State updates are committed only after MAC verification and decryption succeed.
+    pub fn decryptWire(
+        self: *Session,
+        allocator: std.mem.Allocator,
+        msg: *const EncryptedMessage,
+        serialized_without_mac: []const u8,
+        expected_mac: [8]u8,
+        io: std.Io,
+    ) ![]u8 {
+        var root_key = self.root_key;
+        var sending_chain = self.sending_chain;
+        var receiving_chain = self.receiving_chain;
+        var our_ratchet_key = self.our_ratchet_key;
+        var their_ratchet_key = self.their_ratchet_key;
+        var previous_counter = self.previous_counter;
+
+        const need_ratchet = their_ratchet_key == null or
+            !std.mem.eql(u8, &(their_ratchet_key.?), &msg.ratchet_key);
 
         if (need_ratchet) {
-            // Save previous counter
-            if (self.sending_chain) |sc| {
-                self.previous_counter = if (sc.index > 0) sc.index - 1 else 0;
+            if (sending_chain) |sc| {
+                previous_counter = if (sc.index > 0) sc.index - 1 else 0;
             }
 
-            // DH ratchet with their new key
-            self.their_ratchet_key = msg.ratchet_key;
+            their_ratchet_key = msg.ratchet_key;
 
-            if (self.our_ratchet_key) |our_key| {
+            if (our_ratchet_key) |our_key| {
                 const dh1 = try our_key.dh(msg.ratchet_key);
-                const step1 = self.root_key.ratchetStep(dh1);
-                self.root_key = step1.root_key;
-                self.receiving_chain = step1.chain_key;
+                const step1 = root_key.ratchetStep(dh1);
+                root_key = step1.root_key;
+                receiving_chain = step1.chain_key;
 
-                // Generate new sending ratchet
                 const new_kp = keys.KeyPair.generate(io);
                 const dh2 = try new_kp.dh(msg.ratchet_key);
-                const step2 = self.root_key.ratchetStep(dh2);
-                self.root_key = step2.root_key;
-                self.sending_chain = step2.chain_key;
-                self.our_ratchet_key = new_kp;
+                const step2 = root_key.ratchetStep(dh2);
+                root_key = step2.root_key;
+                sending_chain = step2.chain_key;
+                our_ratchet_key = new_kp;
             }
         }
 
-        // Step chain to the right index
-        var chain = self.receiving_chain orelse return error.NoReceivingChain;
+        var chain = receiving_chain orelse return error.NoReceivingChain;
+        if (chain.index > msg.counter) return error.MessageCounterBehind;
         while (chain.index < msg.counter) {
-            const stepped = chain.step();
-            chain = stepped.next;
+            const skipped = chain.step();
+            chain = skipped.next;
             // TODO: store skipped message keys for out-of-order delivery
         }
 
         const stepped = chain.step();
-        self.receiving_chain = stepped.next;
-
         const msg_keys = ratchet.MessageKeys.derive(stepped.message_key_material, msg.counter);
 
-        // AES-256-CBC decrypt
+        var verify_msg = msg.*;
+        verify_msg.mac_key = msg_keys.mac_key;
+        const actual_mac = verify_msg.computeMac(serialized_without_mac);
+        if (!fixedTimeEql8(actual_mac, expected_mac)) return error.InvalidMac;
+
         const padded = try aesCbcDecrypt(allocator, &msg_keys.cipher_key, &msg_keys.iv, msg.ciphertext);
         defer allocator.free(padded);
 
-        // Remove PKCS7 padding
         if (padded.len == 0) return error.InvalidPadding;
         const pad_len = padded[padded.len - 1];
         if (pad_len == 0 or pad_len > 16 or pad_len > padded.len) return error.InvalidPadding;
+
+        self.previous_counter = previous_counter;
+        self.their_ratchet_key = their_ratchet_key;
+        self.root_key = root_key;
+        self.receiving_chain = stepped.next;
+        self.sending_chain = sending_chain;
+        self.our_ratchet_key = our_ratchet_key;
 
         return allocator.dupe(u8, padded[0 .. padded.len - pad_len]);
     }
@@ -222,6 +241,13 @@ pub const EncryptedMessage = struct {
         return mac[0..8].*;
     }
 };
+
+
+fn fixedTimeEql8(a: [8]u8, b: [8]u8) bool {
+    var diff: u8 = 0;
+    for (a, b) |lhs, rhs| diff |= lhs ^ rhs;
+    return diff == 0;
+}
 
 // --- AES-256-CBC ---
 

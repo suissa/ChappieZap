@@ -3,7 +3,6 @@ const ws = @import("websocket_client");
 const noise_mod = @import("noise");
 const xed25519 = @import("xed25519");
 const framing = @import("framing");
-const socket_mod = @import("socket");
 const whatsapp = @import("whatsapp_proto");
 const log = @import("log");
 

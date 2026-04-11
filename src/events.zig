@@ -1,4 +1,3 @@
-const std = @import("std");
 const binary = @import("binary");
 
 /// Events dispatched to the user's event handler.

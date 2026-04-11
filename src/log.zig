@@ -57,7 +57,7 @@ fn print(level: Level, comptime scope: []const u8, comptime fmt: []const u8, arg
 }
 
 fn currentTimestamp() [12]u8 {
-    var tv: std.posix.timeval = undefined;
+    var tv = std.mem.zeroes(std.posix.timeval);
     if (std.posix.system.gettimeofday(&tv, null) != 0) {
         return "00:00:00.000".*;
     }
@@ -74,6 +74,8 @@ fn currentTimestamp() [12]u8 {
         day_seconds.getMinutesIntoHour(),
         day_seconds.getSecondsIntoMinute(),
         millis,
-    }) catch unreachable;
+    }) catch {
+        @panic("timestamp buffer too small");
+    };
     return buf;
 }

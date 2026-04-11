@@ -1,10 +1,5 @@
 const std = @import("std");
 
-const TokenData = struct {
-    page: u8,
-    index: u8,
-};
-
 const tokens_gen = @import("../gen/tokens_generated.zig");
 const token_data = tokens_gen.token_data;
 

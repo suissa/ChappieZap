@@ -49,7 +49,7 @@ pub const Noise = struct {
             return .{
                 .hash = pattern[0..32].*,
                 .salt = pattern[0..32].*,
-                .key = undefined,
+                .key = [_]u8{0} ** 32,
                 .counter = 0,
                 .has_key = false,
             };

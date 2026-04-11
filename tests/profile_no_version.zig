@@ -62,7 +62,9 @@ fn connectAndLoginNoVersion(self: *Client) !void {
     try connectWithPayloadNoVersion(self, .login);
     try client_auth.readUntilLogin(self);
     client_transport.sendActive(self);
-    client_transport.uploadPrekeys(self) catch {};
+    client_transport.uploadPrekeys(self) catch |err| {
+        std.debug.print("profile_no_version: uploadPrekeys failed: {}\n", .{err});
+    };
 }
 
 test "profile: A sends encrypted message to B" {

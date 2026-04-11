@@ -241,6 +241,7 @@ pub fn encodeJid(jid: []const u8, writer: *BinaryWriter) BinaryError!usize {
         .agent = parts.agent,
         .device = parts.device,
         .integrator = parts.integrator,
+        // SAFETY: this borrowed JID is only encoded, never deinitialized or used for allocation.
         .allocator = undefined,
     };
     return encodeJidStruct(&parsed, writer);

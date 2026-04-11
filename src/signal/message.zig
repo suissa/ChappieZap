@@ -86,12 +86,14 @@ pub fn parseSignalMessage(data: []const u8) !ParsedSignalMessage {
     const proto_bytes = data[1 .. data.len - MAC_LENGTH];
 
     var result = ParsedSignalMessage{
-        .ratchet_key = undefined,
+        .ratchet_key = [_]u8{0} ** 32,
         .counter = 0,
         .previous_counter = 0,
         .ciphertext = &.{},
         .mac = mac,
     };
+    var saw_ratchet_key = false;
+    var saw_ciphertext = false;
 
     // Parse protobuf fields
     var pos: usize = 0;
@@ -109,6 +111,7 @@ pub fn parseSignalMessage(data: []const u8) !ParsedSignalMessage {
                 // Skip 0x05 prefix
                 if (proto_bytes[pos] != 0x05) return error.InvalidKeyPrefix;
                 result.ratchet_key = proto_bytes[pos + 1 ..][0..32].*;
+                saw_ratchet_key = true;
                 pos += len;
             },
             2 => { // counter (varint)
@@ -124,6 +127,7 @@ pub fn parseSignalMessage(data: []const u8) !ParsedSignalMessage {
                 const len = try readVarint(proto_bytes, &pos);
                 if (pos + len > proto_bytes.len) return error.InvalidLength;
                 result.ciphertext = proto_bytes[pos..][0..len];
+                saw_ciphertext = true;
                 pos += len;
             },
             else => {
@@ -133,6 +137,7 @@ pub fn parseSignalMessage(data: []const u8) !ParsedSignalMessage {
         }
     }
 
+    if (!saw_ratchet_key or !saw_ciphertext) return error.IncompleteSignalMessage;
     return result;
 }
 
@@ -156,10 +161,15 @@ pub fn parsePreKeySignalMessage(data: []const u8) !ParsedPreKeyMessage {
         .registration_id = 0,
         .prekey_id = null,
         .signed_prekey_id = 0,
-        .base_key = undefined,
-        .identity_key = undefined,
+        .base_key = [_]u8{0} ** 32,
+        .identity_key = [_]u8{0} ** 32,
         .signal_message = &.{},
     };
+    var saw_base_key = false;
+    var saw_identity_key = false;
+    var saw_signal_message = false;
+    var saw_registration_id = false;
+    var saw_signed_prekey_id = false;
 
     var pos: usize = 1;
     while (pos < data.len) {
@@ -179,6 +189,7 @@ pub fn parsePreKeySignalMessage(data: []const u8) !ParsedPreKeyMessage {
                 if (len < 33 or pos + len > data.len) return error.InvalidLength;
                 if (data[pos] != 0x05) return error.InvalidKeyPrefix;
                 result.base_key = data[pos + 1 ..][0..32].*;
+                saw_base_key = true;
                 pos += len;
             },
             3 => { // identity_key (bytes)
@@ -187,6 +198,7 @@ pub fn parsePreKeySignalMessage(data: []const u8) !ParsedPreKeyMessage {
                 if (len < 33 or pos + len > data.len) return error.InvalidLength;
                 if (data[pos] != 0x05) return error.InvalidKeyPrefix;
                 result.identity_key = data[pos + 1 ..][0..32].*;
+                saw_identity_key = true;
                 pos += len;
             },
             4 => { // message (bytes)
@@ -194,15 +206,18 @@ pub fn parsePreKeySignalMessage(data: []const u8) !ParsedPreKeyMessage {
                 const len = try readVarint(data, &pos);
                 if (pos + len > data.len) return error.InvalidLength;
                 result.signal_message = data[pos..][0..len];
+                saw_signal_message = true;
                 pos += len;
             },
             5 => { // registration_id (varint)
                 if (wire_type != 0) return error.InvalidWireType;
                 result.registration_id = @intCast(try readVarint(data, &pos));
+                saw_registration_id = true;
             },
             6 => { // signed_prekey_id (varint)
                 if (wire_type != 0) return error.InvalidWireType;
                 result.signed_prekey_id = @intCast(try readVarint(data, &pos));
+                saw_signed_prekey_id = true;
             },
             else => {
                 pos = try skipField(data, pos, wire_type);
@@ -210,6 +225,9 @@ pub fn parsePreKeySignalMessage(data: []const u8) !ParsedPreKeyMessage {
         }
     }
 
+    if (!saw_base_key or !saw_identity_key or !saw_signal_message or !saw_registration_id or !saw_signed_prekey_id) {
+        return error.IncompletePreKeySignalMessage;
+    }
     return result;
 }
 
@@ -364,6 +382,18 @@ test "serializeSignalMessage matches legacy bytes" {
     try std.testing.expectEqualSlices(u8, msg.ciphertext, parsed.ciphertext);
 }
 
+test "parseSignalMessage rejects missing required fields" {
+    const missing_ratchet_and_ciphertext = [_]u8{0x33} ++ [_]u8{
+        0x10, 0x01,
+        0x18, 0x00,
+    } ++ [_]u8{0} ** MAC_LENGTH;
+
+    try std.testing.expectError(
+        error.IncompleteSignalMessage,
+        parseSignalMessage(&missing_ratchet_and_ciphertext),
+    );
+}
+
 test "serializePreKeySignalMessage matches legacy bytes" {
     const allocator = std.testing.allocator;
 
@@ -401,6 +431,13 @@ test "serializePreKeySignalMessage matches legacy bytes" {
     try std.testing.expectEqualSlices(u8, &makePattern32(0x22), &parsed.base_key);
     try std.testing.expectEqualSlices(u8, &makePattern32(0x44), &parsed.identity_key);
     try std.testing.expectEqualSlices(u8, &inner_signal, parsed.signal_message);
+}
+
+test "parsePreKeySignalMessage rejects missing required fields" {
+    try std.testing.expectError(
+        error.IncompletePreKeySignalMessage,
+        parsePreKeySignalMessage(&[_]u8{0x33}),
+    );
 }
 
 fn makePattern32(start: u8) [32]u8 {

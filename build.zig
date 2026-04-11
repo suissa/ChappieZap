@@ -251,6 +251,26 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
+    const benchmark_exe = b.addExecutable(.{
+        .name = "benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+            .single_threaded = if (optimize == .ReleaseSmall) true else null,
+            .unwind_tables = if (optimize == .ReleaseSmall) .none else null,
+            .imports = &.{
+                .{ .name = "zigwhats", .module = mod },
+            },
+        }),
+    });
+    if (optimize == .ReleaseSmall) {
+        benchmark_exe.link_function_sections = true;
+        benchmark_exe.link_data_sections = true;
+    }
+
+    b.installArtifact(benchmark_exe);
+
     const profile_mem_exe = b.addExecutable(.{
         .name = "profile-memory",
         .root_module = b.createModule(.{
@@ -285,6 +305,12 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
+
+    const benchmark_step = b.step("benchmark", "Run the benchmark bot against the mock transport");
+    const benchmark_cmd = b.addRunArtifact(benchmark_exe);
+    benchmark_step.dependOn(&benchmark_cmd.step);
+    benchmark_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| benchmark_cmd.addArgs(args);
 
     // --- Unit tests ---
 

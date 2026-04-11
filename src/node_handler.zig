@@ -10,13 +10,16 @@ pub fn shouldAck(node: *const binary.Node) bool {
 }
 
 /// Build an <ack> node for the given stanza.
-pub fn buildAckNode(allocator: std.mem.Allocator, node: *const binary.Node) !binary.Node {
+pub fn buildAckNode(allocator: std.mem.Allocator, node: *const binary.Node, own_phone_jid: ?[]const u8) !binary.Node {
     var ack = binary.Node.initBorrowed(allocator, "ack");
     errdefer ack.deinit();
 
     try ack.addAttributeBorrowed("class", node.tag);
     try ack.addAttributeBorrowed("id", node.getAttribute("id") orelse return error.MissingId);
     try ack.addAttributeBorrowed("to", node.getAttribute("from") orelse return error.MissingFrom);
+    if (std.mem.eql(u8, node.tag, "message")) {
+        if (own_phone_jid) |from| try ack.addAttributeBorrowed("from", from);
+    }
 
     if (node.getAttribute("participant")) |p| try ack.addAttributeBorrowed("participant", p);
 

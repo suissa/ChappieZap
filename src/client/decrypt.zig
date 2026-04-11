@@ -40,6 +40,8 @@ pub fn decryptMessageNode(self: anytype, node: *const binary.Node) ?[]u8 {
 }
 
 pub fn decryptPreKeyMessage(self: anytype, from_jid: []const u8, ciphertext: []const u8) ![]u8 {
+    var locked = try session_store.lockSession(self, from_jid);
+    defer locked.unlock();
     const pkmsg = try signal.message.parsePreKeySignalMessage(ciphertext);
 
     var our_otpk: ?signal.KeyPair = null;
@@ -73,12 +75,19 @@ pub fn decryptPreKeyMessage(self: anytype, from_jid: []const u8, ciphertext: []c
     );
 
     const plaintext = try decryptSignalMessage(self, &session, pkmsg.signal_message, pkmsg.identity_key);
-    session_store.storeSession(self, from_jid, session) catch {};
+    locked.put(session) catch |err| {
+        log.warn("Client/Decrypt", "Failed to persist responder session for {s}: {}", .{
+            from_jid,
+            err,
+        });
+    };
     return plaintext;
 }
 
 pub fn decryptSessionMessage(self: anytype, from_jid: []const u8, ciphertext: []const u8) ![]u8 {
-    const session = session_store.findSession(self, from_jid) orelse return error.NoSession;
+    var locked = try session_store.lockSession(self, from_jid);
+    defer locked.unlock();
+    const session = locked.get() orelse return error.NoSession;
     return decryptSignalMessage(self, session, ciphertext, session.remote_identity_public);
 }
 
@@ -92,8 +101,14 @@ pub fn decryptSignalMessage(self: anytype, session: *signal.Session, data: []con
         .ciphertext = @constCast(parsed.ciphertext),
         .sender_identity = sender_identity,
         .receiver_identity = self.identity.key_pair.public,
-        .mac_key = undefined,
+        .mac_key = [_]u8{0} ** 32,
     };
 
-    return session.decrypt(self.allocator, &enc_msg, self.io);
+    return session.decryptWire(
+        self.allocator,
+        &enc_msg,
+        data[0 .. data.len - 8],
+        parsed.mac,
+        self.io,
+    );
 }

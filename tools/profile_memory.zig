@@ -410,7 +410,9 @@ fn connectAndLoginNoVersion(self: *Client) !void {
     try connectWithPayloadNoVersion(self, .login);
     try client_auth.readUntilLogin(self);
     client_transport.sendActive(self);
-    client_transport.uploadPrekeys(self) catch {};
+    client_transport.uploadPrekeys(self) catch |err| {
+        std.debug.print("profile_memory: uploadPrekeys failed: {}\n", .{err});
+    };
 }
 
 pub fn main(init: std.process.Init) !void {

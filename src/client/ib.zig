@@ -48,5 +48,7 @@ fn sendCleanDirty(self: anytype, dirty_type: []const u8, timestamp: ?[]const u8)
     if (timestamp) |ts| try clean.addAttributeBorrowed("timestamp", ts);
     try iq.addChild(&clean);
 
-    client_transport.sendNode(self, &iq) catch {};
+    client_transport.sendNode(self, &iq) catch |err| {
+        log.warn("Client/IB", "Failed to send clean dirty for type={s}: {}", .{ dirty_type, err });
+    };
 }

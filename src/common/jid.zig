@@ -116,3 +116,39 @@ test "parse interop jid" {
     try std.testing.expectEqual(@as(u16, 12345), parts.device);
     try std.testing.expectEqual(@as(u16, 56789), parts.integrator);
 }
+
+pub fn writeProtocolAddressKey(buf: []u8, jid: []const u8) ![]const u8 {
+    const parts = try parse(jid);
+    if (std.mem.endsWith(u8, parts.server, ".0")) {
+        return std.fmt.bufPrint(buf, "{s}@{s}", .{ parts.user_part, parts.server });
+    }
+    const mapped_server = if (std.mem.eql(u8, parts.server, "s.whatsapp.net")) "c.us" else parts.server;
+
+    if (parts.has_device) {
+        return std.fmt.bufPrint(buf, "{s}:{d}@{s}.0", .{ parts.bare_user, parts.device, mapped_server });
+    }
+    return std.fmt.bufPrint(buf, "{s}@{s}.0", .{ parts.bare_user, mapped_server });
+}
+
+pub fn protocolAddressKeyAlloc(allocator: std.mem.Allocator, jid: []const u8) ![]u8 {
+    var buf: [128]u8 = undefined;
+    const key = try writeProtocolAddressKey(&buf, jid);
+    return allocator.dupe(u8, key);
+}
+
+test "write protocol address key normalizes pn and lid" {
+    var buf: [128]u8 = undefined;
+
+    try std.testing.expectEqualStrings(
+        "559980000001@c.us.0",
+        try writeProtocolAddressKey(&buf, "559980000001@s.whatsapp.net"),
+    );
+    try std.testing.expectEqualStrings(
+        "559980000001:33@c.us.0",
+        try writeProtocolAddressKey(&buf, "559980000001:33@s.whatsapp.net"),
+    );
+    try std.testing.expectEqualStrings(
+        "100000012345678@lid.0",
+        try writeProtocolAddressKey(&buf, "100000012345678@lid"),
+    );
+}

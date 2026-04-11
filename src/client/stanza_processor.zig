@@ -31,6 +31,17 @@ const dispatch_table = [_]DispatchEntry{
     .{ .tag = "receipt", .step = .receipt, .returns_early = false },
 };
 
+pub const ProcessedMessage = struct {
+    plaintext: ?[]u8 = null,
+    body: ?[]const u8 = null,
+    chat: []const u8,
+
+    pub fn deinit(self: *ProcessedMessage, allocator: std.mem.Allocator) void {
+        if (self.plaintext) |plaintext| allocator.free(plaintext);
+        self.* = .{ .chat = "" };
+    }
+};
+
 pub fn processNode(self: anytype, node: *const binary.Node) void {
     const tag = node.tag;
 
@@ -49,7 +60,10 @@ pub fn processNode(self: anytype, node: *const binary.Node) void {
     }
 
     if (node_handler.shouldAck(node)) {
-        client_transport.sendAck(self, node) catch {};
+        client_transport.sendAck(self, node) catch |err| {
+            if (isBenignSendShutdownError(err)) return;
+            log.warn("Client/Recv", "Failed to send ack for <{s}>: {}", .{ node.tag, err });
+        };
     }
 }
 
@@ -72,38 +86,50 @@ fn handleNotification(self: anytype, node: *const binary.Node) void {
     }
 }
 
-fn handleMessage(self: anytype, node: *const binary.Node) void {
+pub fn processMessageNode(self: anytype, node: *const binary.Node) ProcessedMessage {
     if (self.options.tls) {
         if (self.address_book.rememberFromMessage(node) catch null) |mapping| {
             session_store.migrateSessionsOnLidDiscovery(self, mapping.pn_jid, mapping.lid_jid);
         }
     }
+
+    const chat = messageChatJidForMatch(self, node);
     const decrypted = decrypt_mod.decryptMessageNode(self, node);
-    defer if (decrypted) |d| self.allocator.free(d);
-
-    var body: ?[]const u8 = null;
-    if (decrypted) |d| body = messaging.decodeTextMessage(d);
-
-    if (self._last_msg_from) |old| self.allocator.free(old);
-    self._last_msg_from = self.allocator.dupe(u8, node.getAttribute("from") orelse "") catch null;
-    if (self._last_msg_chat) |old| self.allocator.free(old);
-    self._last_msg_chat = self.allocator.dupe(u8, jid_helpers.messageChatJid(&self.address_book, node)) catch null;
-    if (self._last_msg_id) |old| self.allocator.free(old);
-    self._last_msg_id = self.allocator.dupe(u8, node.getAttribute("id") orelse "") catch null;
-    if (self._last_msg_text) |old| self.allocator.free(old);
-    self._last_msg_text = if (body) |b| self.allocator.dupe(u8, b) catch null else null;
-    self._last_msg_decrypted = body != null;
+    var processed = ProcessedMessage{ .plaintext = decrypted, .chat = chat };
+    if (decrypted) |d| processed.body = messaging.decodeTextMessage(d);
 
     self.emit(.{ .message = .{
         .from = node.getAttribute("from") orelse "",
-        .chat = jid_helpers.messageChatJid(&self.address_book, node),
+        .chat = chat,
         .id = node.getAttribute("id") orelse "",
         .node = node,
-        .body = body,
+        .body = processed.body,
     } });
+
+    if (decrypted != null) {
+        client_transport.sendDeliveryReceipt(self, node) catch |err| {
+            if (isBenignSendShutdownError(err)) return processed;
+            log.warn("Client/Receipt", "Failed to send delivery receipt for {s}: {}", .{
+                node.getAttribute("id") orelse "",
+                err,
+            });
+        };
+    }
+
+    return processed;
 }
 
-fn handleReceipt(self: anytype, node: *const binary.Node) void {
-    if (self._last_receipt_from) |old| self.allocator.free(old);
-    self._last_receipt_from = self.allocator.dupe(u8, node.getAttribute("from") orelse "") catch null;
+fn handleMessage(self: anytype, node: *const binary.Node) void {
+    var processed = processMessageNode(self, node);
+    defer processed.deinit(self.allocator);
+}
+
+fn handleReceipt(_: anytype, _: *const binary.Node) void {}
+
+pub fn messageChatJidForMatch(self: anytype, node: *const binary.Node) []const u8 {
+    return jid_helpers.messageChatJid(&self.address_book, node);
+}
+
+fn isBenignSendShutdownError(err: anyerror) bool {
+    return err == error.WriteFailed or err == error.NotConnected;
 }
