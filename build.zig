@@ -205,7 +205,7 @@ pub fn build(b: *std.Build) void {
 
     // --- Library root module ---
 
-    const mod = b.addModule("zigwhats", .{
+    const mod = b.addModule("whatszig", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .imports = &.{
@@ -230,7 +230,7 @@ pub fn build(b: *std.Build) void {
     // --- Executable ---
 
     const exe = b.addExecutable(.{
-        .name = "zigwhats",
+        .name = "whatszig",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
@@ -240,7 +240,7 @@ pub fn build(b: *std.Build) void {
             .single_threaded = if (optimize == .ReleaseSmall) true else null,
             .unwind_tables = if (optimize == .ReleaseSmall) .none else null,
             .imports = &.{
-                .{ .name = "zigwhats", .module = mod },
+                .{ .name = "whatszig", .module = mod },
             },
         }),
     });
@@ -260,7 +260,7 @@ pub fn build(b: *std.Build) void {
             .single_threaded = if (optimize == .ReleaseSmall) true else null,
             .unwind_tables = if (optimize == .ReleaseSmall) .none else null,
             .imports = &.{
-                .{ .name = "zigwhats", .module = mod },
+                .{ .name = "whatszig", .module = mod },
             },
         }),
     });

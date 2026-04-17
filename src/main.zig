@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const zigwhats = @import("zigwhats");
-const log = zigwhats.log;
+const whatszig = @import("whatszig");
+const log = whatszig.log;
 
 pub const std_options: std.Options = switch (builtin.mode) {
     .ReleaseSmall => .{
@@ -17,7 +17,7 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
 
-    var client = try zigwhats.Client.init(allocator, io, .{
+    var client = try whatszig.Client.init(allocator, io, .{
         .on_event = handleEvent,
     });
     defer client.deinit();
@@ -30,8 +30,8 @@ pub fn main(init: std.process.Init) !void {
     };
 }
 
-fn handleEvent(event: zigwhats.Event, ctx: *anyopaque) void {
-    const client: *zigwhats.Client = @ptrCast(@alignCast(ctx));
+fn handleEvent(event: whatszig.Event, ctx: *anyopaque) void {
+    const client: *whatszig.Client = @ptrCast(@alignCast(ctx));
 
     switch (event) {
         .qr_code => |qr| {

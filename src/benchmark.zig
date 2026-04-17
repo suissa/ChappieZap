@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const zigwhats = @import("zigwhats");
-const log = zigwhats.log;
+const whatszig = @import("whatszig");
+const log = whatszig.log;
 
 pub const std_options: std.Options = switch (builtin.mode) {
     .ReleaseSmall => .{
@@ -16,7 +16,7 @@ const RuntimeConfig = struct {
     port: u16 = 8080,
     tls: bool = false,
     path: []const u8 = "/ws/chat",
-    push_name: []const u8 = "zigwhats-benchmark",
+    push_name: []const u8 = "whatszig-benchmark",
     host_owned: ?[]const u8 = null,
     path_owned: ?[]const u8 = null,
 
@@ -35,7 +35,7 @@ pub fn main(init: std.process.Init) !void {
     var runtime_config = try loadRuntimeConfig(allocator, init.environ_map);
     defer runtime_config.deinit(allocator);
 
-    var client = try zigwhats.Client.init(allocator, io, .{
+    var client = try whatszig.Client.init(allocator, io, .{
         .host = runtime_config.host,
         .port = runtime_config.port,
         .tls = runtime_config.tls,
@@ -60,8 +60,8 @@ pub fn main(init: std.process.Init) !void {
     };
 }
 
-fn handleEvent(event: zigwhats.Event, ctx: *anyopaque) void {
-    const client: *zigwhats.Client = @ptrCast(@alignCast(ctx));
+fn handleEvent(event: whatszig.Event, ctx: *anyopaque) void {
+    const client: *whatszig.Client = @ptrCast(@alignCast(ctx));
 
     switch (event) {
         .qr_code => |qr| {
