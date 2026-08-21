@@ -14,6 +14,8 @@ pub const WebSocketClient = @import("websocket_client").WebSocketClient;
 pub const proto = @import("whatsapp_proto");
 pub const signal = @import("signal");
 pub const log = @import("log");
+pub const qr = @import("qr");
+pub const pair_code = @import("pair_code");
 
 test {
     _ = @import("noise");
@@ -25,4 +27,6 @@ test {
     _ = @import("signal");
     _ = @import("addressing");
     _ = @import("usync");
+    _ = @import("qr");
+    _ = @import("pair_code");
 }

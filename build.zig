@@ -179,6 +179,19 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const qr_mod = b.addModule("qr", .{
+        .root_source_file = b.path("src/qr.zig"),
+        .target = target,
+    });
+
+    const pair_code_mod = b.addModule("pair_code", .{
+        .root_source_file = b.path("src/pair_code.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "binary", .module = binary_mod },
+        },
+    });
+
     const client_mod = b.addModule("client", .{
         .root_source_file = b.path("src/client.zig"),
         .target = target,
@@ -193,6 +206,8 @@ pub fn build(b: *std.Build) void {
             .{ .name = "prekey", .module = prekey_mod },
             .{ .name = "messaging", .module = messaging_mod },
             .{ .name = "pair", .module = pair_mod },
+            .{ .name = "pair_code", .module = pair_code_mod },
+            .{ .name = "qr", .module = qr_mod },
             .{ .name = "whatsapp_proto", .module = wa_proto_mod },
             .{ .name = "events", .module = events_mod },
             .{ .name = "addressing", .module = addressing_mod },
@@ -224,6 +239,8 @@ pub fn build(b: *std.Build) void {
             .{ .name = "usync", .module = usync_mod },
             .{ .name = "jid_common", .module = jid_common_mod },
             .{ .name = "log", .module = log_mod },
+            .{ .name = "qr", .module = qr_mod },
+            .{ .name = "pair_code", .module = pair_code_mod },
         },
     });
 

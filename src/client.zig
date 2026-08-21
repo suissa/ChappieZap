@@ -31,6 +31,7 @@ pub const ClientOptions = struct {
     tls_ca_cert_path: ?[]const u8 = null,
     path: []const u8 = "/ws/chat",
     push_name: []const u8 = "whatszig",
+    pairing_phone_number: ?[]const u8 = null,
     experimental_post_login_init: bool = false,
     on_event: ?EventHandler = null,
     event_context: ?*anyopaque = null,
@@ -51,6 +52,12 @@ pub const Client = struct {
     lid: ?[]u8 = null,
     phone_jid: ?[]u8 = null, // "559980000001@s.whatsapp.net"
     device_id: u32 = 0, // companion device ID from pairing (e.g. 33)
+
+    // Pair code state
+    pair_code_ephemeral: ?std.crypto.dh.X25519.KeyPair = null,
+    pair_code_str: ?[8]u8 = null,
+    pair_code_ref: ?[]u8 = null,
+    pair_code_phone: ?[]u8 = null,
 
     identity: signal.IdentityKeyPair,
     signed_prekey: signal.SignedPreKey,
@@ -157,6 +164,8 @@ pub const Client = struct {
     }
 
     pub fn deinit(self: *Client) void {
+        if (self.pair_code_phone) |p| self.allocator.free(p);
+        if (self.pair_code_ref) |ref| self.allocator.free(ref);
         if (self.account_device_identity) |bytes| self.allocator.free(bytes);
         session_store.deinitSessionShards(&self.session_shards, self.allocator);
         self.send_text_buf.deinit(self.allocator);

@@ -70,6 +70,9 @@ fn handleEvent(event: whatszig.Event, ctx: *anyopaque) void {
                 log.info("Benchmark", "QR: {s}", .{qr.code});
             }
         },
+        .pairing_code => |pc| {
+            log.info("Benchmark", "Pairing Code for {s}: {s}", .{ pc.phone, pc.formatted_code });
+        },
         .pair_success => |ps| {
             log.info("Benchmark", "Paired! phone={s} lid={s}", .{ ps.phone_jid, ps.lid });
         },

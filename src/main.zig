@@ -17,7 +17,18 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
 
+    var args_it = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
+    defer args_it.deinit();
+    _ = args_it.skip(); // skip executable name
+
+    var pairing_phone: ?[]const u8 = null;
+    if (args_it.next()) |arg| {
+        pairing_phone = arg;
+        log.info("Main", "Pairing phone number specified: {s}", .{arg});
+    }
+
     var client = try whatszig.Client.init(allocator, io, .{
+        .pairing_phone_number = pairing_phone,
         .on_event = handleEvent,
     });
     defer client.deinit();
@@ -41,9 +52,31 @@ fn handleEvent(event: whatszig.Event, ctx: *anyopaque) void {
                 log.info("Main", "", .{});
                 log.info("Main", "Scan this QR code with WhatsApp on your phone:", .{});
                 log.info("Main", "WhatsApp > Linked Devices > Link a Device", .{});
-                log.info("Main", "{s}", .{qr.code});
+
+                if (whatszig.qr.QrCode.encodeText(client.allocator, qr.code, .L)) |qr_matrix| {
+                    var mut_qr = qr_matrix;
+                    defer mut_qr.deinit();
+                    if (mut_qr.renderTerminal(client.allocator)) |rendered| {
+                        defer client.allocator.free(rendered);
+                        std.debug.print("{s}", .{rendered});
+                    } else |_| {
+                        log.info("Main", "{s}", .{qr.code});
+                    }
+                } else |_| {
+                    log.info("Main", "{s}", .{qr.code});
+                }
                 log.info("Main", "", .{});
             }
+        },
+        .pairing_code => |pc| {
+            log.info("Main", "", .{});
+            log.info("Main", "====================================================", .{});
+            log.info("Main", "Pairing code for +{s}:", .{pc.phone});
+            log.info("Main", "  >>> {s} <<<", .{pc.formatted_code});
+            log.info("Main", "Enter this code in WhatsApp on your phone:", .{});
+            log.info("Main", "  WhatsApp > Linked Devices > Link a Device > Link with phone number instead", .{});
+            log.info("Main", "====================================================", .{});
+            log.info("Main", "", .{});
         },
         .pair_success => |ps| {
             log.info("Main", "Paired! phone={s} lid={s}", .{ ps.phone_jid, ps.lid });
