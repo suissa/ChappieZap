@@ -252,16 +252,16 @@ pub fn buildCompanionHelloIq(
     try auth_node.setContentBytes(noise_static_pub);
     try reg.addChild(&auth_node);
 
-    // 3. companion_platform_id
+    // 3. companion_platform_id: '1' for Chrome (required by WA servers)
     var plat_id = binary.Node.initBorrowed(allocator, "companion_platform_id");
     defer plat_id.deinit();
-    try plat_id.setContentBytesBorrowed("whatszig");
+    try plat_id.setContentBytesBorrowed("1");
     try reg.addChild(&plat_id);
 
-    // 4. companion_platform_display
+    // 4. companion_platform_display: "Chrome (Linux)" (standard WA Web display format)
     var plat_disp = binary.Node.initBorrowed(allocator, "companion_platform_display");
     defer plat_disp.deinit();
-    try plat_disp.setContentBytesBorrowed("Linux (whatszig)");
+    try plat_disp.setContentBytesBorrowed("Chrome (Linux)");
     try reg.addChild(&plat_disp);
 
     // 5. link_code_pairing_nonce
@@ -448,6 +448,11 @@ test "build companion_hello and companion_finish IQs" {
 
     try std.testing.expectEqualStrings("iq", hello_iq.tag);
     try std.testing.expectEqualStrings("set", hello_iq.getAttribute("type").?);
+
+    const reg = hello_iq.getContentNodes().?[0];
+    const reg_children = reg.getContentNodes().?;
+    try std.testing.expectEqualStrings("1", reg_children[2].getContentBytes().?);
+    try std.testing.expectEqualStrings("Chrome (Linux)", reg_children[3].getContentBytes().?);
 
     var finish_iq = try buildCompanionFinishIq(allocator, "5515991957645", &[_]u8{0xCC} ** 156, &auth_pub, "ref123", "12346");
     defer finish_iq.deinit();
