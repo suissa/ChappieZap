@@ -29,24 +29,167 @@ pub const QrCode = struct {
         return encodeTextVersion(allocator, text, version, min_ec);
     }
 
-    /// Render QR code into terminal string representation using half-block Unicode characters.
-    /// Returns an allocated string with the rendered QR code.
+    /// Render QR code to SVG string
+    pub fn renderSvg(self: QrCode, allocator: std.mem.Allocator) ![]u8 {
+        var list = try std.Io.Writer.Allocating.initCapacity(allocator, 16384);
+        defer list.deinit();
+        const writer = &list.writer;
+
+        const margin: usize = 4;
+        const total = self.size + margin * 2;
+
+        try writer.print(
+            \\<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {d} {d}" shape-rendering="crispEdges" width="320" height="320">
+            \\<rect width="{d}" height="{d}" fill="#ffffff"/>
+            \\<path fill="#000000" d="
+        , .{ total, total, total, total });
+
+        for (0..self.size) |y| {
+            for (0..self.size) |x| {
+                if (self.get(x, y)) {
+                    try writer.print("M{d},{d}h1v1h-1z ", .{ x + margin, y + margin });
+                }
+            }
+        }
+
+        try writer.writeAll("\"/></svg>");
+        return try list.toOwnedSlice();
+    }
+
+    /// Render QR code into standalone HTML page
+    pub fn renderHtml(self: QrCode, allocator: std.mem.Allocator, raw_code: []const u8) ![]u8 {
+        const svg = try self.renderSvg(allocator);
+        defer allocator.free(svg);
+
+        var list = try std.Io.Writer.Allocating.initCapacity(allocator, 32768);
+        defer list.deinit();
+        const writer = &list.writer;
+
+        try writer.print(
+            \\<!DOCTYPE html>
+            \\<html lang="pt-BR">
+            \\<head>
+            \\<meta charset="UTF-8">
+            \\<meta name="viewport" content="width=device-width, initial-scale=1.0">
+            \\<title>WhatsZig - Conectar WhatsApp</title>
+            \\<style>
+            \\  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+            \\  body {{
+            \\    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            \\    background: #111b21;
+            \\    color: #e9edef;
+            \\    display: flex;
+            \\    flex-direction: column;
+            \\    align-items: center;
+            \\    justify-content: center;
+            \\    min-height: 100vh;
+            \\    padding: 24px;
+            \\  }}
+            \\  .card {{
+            \\    background: #202c33;
+            \\    border-radius: 16px;
+            \\    padding: 32px;
+            \\    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+            \\    text-align: center;
+            \\    max-width: 440px;
+            \\    width: 100%;
+            \\  }}
+            \\  .logo {{
+            \\    font-size: 28px;
+            \\    font-weight: 700;
+            \\    color: #00a884;
+            \\    margin-bottom: 8px;
+            \\    letter-spacing: -0.5px;
+            \\  }}
+            \\  .subtitle {{
+            \\    color: #8696a0;
+            \\    font-size: 14px;
+            \\    margin-bottom: 24px;
+            \\  }}
+            \\  .qr-wrapper {{
+            \\    background: #ffffff;
+            \\    padding: 16px;
+            \\    border-radius: 12px;
+            \\    display: inline-block;
+            \\    box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+            \\    margin-bottom: 24px;
+            \\  }}
+            \\  .qr-wrapper svg {{
+            \\    display: block;
+            \\    width: 280px;
+            \\    height: 280px;
+            \\  }}
+            \\  .steps {{
+            \\    text-align: left;
+            \\    background: #111b21;
+            \\    border-radius: 10px;
+            \\    padding: 16px;
+            \\    font-size: 13px;
+            \\    line-height: 1.6;
+            \\    color: #d1d7db;
+            \\  }}
+            \\  .steps strong {{ color: #00a884; }}
+            \\  .steps ol {{ margin: 8px 0 0; padding-left: 18px; }}
+            \\  .steps li {{ margin-bottom: 4px; }}
+            \\  .payload {{
+            \\    margin-top: 16px;
+            \\    font-family: monospace;
+            \\    font-size: 10px;
+            \\    color: #667781;
+            \\    background: #0b141a;
+            \\    padding: 8px;
+            \\    border-radius: 6px;
+            \\    word-break: break-all;
+            \\    user-select: all;
+            \\  }}
+            \\</style>
+            \\</head>
+            \\<body>
+            \\<div class="card">
+            \\  <div class="logo">⚡ WhatsZig</div>
+            \\  <div class="subtitle">Conecte sua conta do WhatsApp</div>
+            \\  <div class="qr-wrapper">
+            \\    {s}
+            \\  </div>
+            \\  <div class="steps">
+            \\    <strong>Passo a passo no celular:</strong>
+            \\    <ol>
+            \\      <li>Abra o <b>WhatsApp</b> no seu telefone</li>
+            \\      <li>Toque em <b>Mais opções</b> (Android ⋮) ou <b>Configurações</b> (iOS ⚙️)</li>
+            \\      <li>Toque em <b>Aparelhos conectados</b></li>
+            \\      <li>Toque em <b>Conectar um aparelho</b></li>
+            \\      <li>Aponte a câmera para o QR Code acima</li>
+            \\    </ol>
+            \\  </div>
+            \\  <div class="payload">Ref: {s}</div>
+            \\</div>
+            \\</body>
+            \\</html>
+        , .{ svg, raw_code });
+
+        return try list.toOwnedSlice();
+    }
+
+    /// Render QR code into terminal string representation with ANSI background & half-block characters.
+    /// Using explicit ANSI 47m (White BG) and 30m (Black FG) guarantees 100% contrast on ANY terminal.
     pub fn renderTerminal(self: QrCode, allocator: std.mem.Allocator) ![]u8 {
         const quiet_zone = 2;
         const total_size = self.size + quiet_zone * 2;
 
         var allocating_writer = try std.Io.Writer.Allocating.initCapacity(
             allocator,
-            total_size * (total_size / 2 + 4) * 4,
+            total_size * (total_size / 2 + 6) * 16,
         );
         defer allocating_writer.deinit();
         const writer = &allocating_writer.writer;
 
-        // Top margin / quiet zone
         try writer.writeAll("\n");
 
         var y: usize = 0;
         while (y < total_size) : (y += 2) {
+            // Set White background (47m) and Black foreground (30m)
+            try writer.writeAll("\x1b[47m\x1b[30m");
+
             for (0..total_size) |x| {
                 const top_black = if (x >= quiet_zone and x < self.size + quiet_zone and y >= quiet_zone and y < self.size + quiet_zone)
                     self.get(x - quiet_zone, y - quiet_zone)
@@ -60,19 +203,25 @@ pub const QrCode = struct {
                     false;
 
                 if (top_black and bottom_black) {
-                    try writer.writeAll(" ");
-                } else if (top_black and !bottom_black) {
-                    try writer.writeAll("▄");
-                } else if (!top_black and bottom_black) {
-                    try writer.writeAll("▀");
-                } else {
+                    // Both dark: full foreground block (black)
                     try writer.writeAll("█");
+                } else if (top_black and !bottom_black) {
+                    // Top dark, bottom light: upper half block (black top on white bg)
+                    try writer.writeAll("▀");
+                } else if (!top_black and bottom_black) {
+                    // Top light, bottom dark: lower half block (black bottom on white bg)
+                    try writer.writeAll("▄");
+                } else {
+                    // Both light: space (white background)
+                    try writer.writeAll(" ");
                 }
             }
-            try writer.writeAll("\n");
+
+            // Reset ANSI styling and add newline
+            try writer.writeAll("\x1b[0m\n");
         }
 
-        try writer.writeAll("\n");
+        try writer.writeAll("\x1b[0m\n");
         return allocating_writer.toOwnedSlice();
     }
 };
@@ -132,7 +281,7 @@ const TOTAL_CODEWORDS_TABLE = [41]u16{
     2323, 2465, 2611, 2761, 2876, 3034, 3196, 3362, 3532, 3706,
 };
 
-// Number of error correction blocks for each version and EC level
+// Number of error correction blocks for each version and EC level [L, M, Q, H]
 const EC_BLOCKS_TABLE = [41][4]u8{
     .{ 0, 0, 0, 0 },
     .{ 1, 1, 1, 1 }, // 1
@@ -232,24 +381,25 @@ fn ecIndex(ec: EcLevel) usize {
 }
 
 fn getDataCodewords(version: u8, ec: EcLevel) u16 {
-    return TOTAL_CODEWORDS_TABLE[version] - EC_CODEWORDS_TABLE[version][ecIndex(ec)];
+    const total = TOTAL_CODEWORDS_TABLE[version];
+    const ec_cw = EC_CODEWORDS_TABLE[version][ecIndex(ec)];
+    return total - ec_cw;
 }
 
-pub fn getMinVersion(data_len: usize, ec: EcLevel) ?u8 {
+fn getMinVersion(byte_count: usize, ec: EcLevel) ?u8 {
     for (1..41) |v| {
         const ver: u8 = @intCast(v);
-        const data_capacity = getDataCodewords(ver, ec);
-        const header_bits: usize = 4 + (if (ver < 10) @as(usize, 8) else 16);
-        const total_data_bits = header_bits + data_len * 8;
-        const required_bytes = (total_data_bits + 7) / 8;
-        if (required_bytes <= data_capacity) {
-            return ver;
-        }
+        const data_cw = getDataCodewords(ver, ec);
+        // Overhead in byte mode: mode (4 bits) + char count (8 or 16 bits)
+        const header_bits: usize = if (ver < 10) 4 + 8 else 4 + 16;
+        const total_bits = header_bits + byte_count * 8;
+        const needed_cw = (total_bits + 7) / 8;
+        if (needed_cw <= data_cw) return ver;
     }
     return null;
 }
 
-// --- Galois Field GF(256) Math for Reed-Solomon ---
+// --- Galois Field GF(2^8) Arithmetic ---
 
 const GF_EXP: [512]u8 = blk: {
     @setEvalBranchQuota(10000);
@@ -258,9 +408,9 @@ const GF_EXP: [512]u8 = blk: {
     for (0..255) |i| {
         exp[i] = @intCast(x);
         exp[i + 255] = @intCast(x);
-        x <<= 1;
-        if ((x & 0x100) != 0) {
-            x ^= 0x11D; // Primitive polynomial x^8 + x^4 + x^3 + x^2 + 1
+        x = x * 2;
+        if (x >= 256) {
+            x = x ^ 285; // 0x11D primitive polynomial
         }
     }
     exp[510] = exp[0];
@@ -284,14 +434,17 @@ fn gfMul(x: u8, y: u8) u8 {
     return GF_EXP[log_sum];
 }
 
+/// Computes the Reed-Solomon generator polynomial for `degree` error correction codewords.
+/// Out is slice of size `degree + 1`, representing coefficients [c0, c1, ..., c_degree] where c0 is constant.
 fn rsGeneratorPoly(degree: usize, out: []u8) void {
     @memset(out[0 .. degree + 1], 0);
     out[0] = 1;
     for (0..degree) |i| {
         const factor = GF_EXP[i];
-        var j = i + 1;
+        out[i + 1] = out[i];
+        var j = i;
         while (j > 0) : (j -= 1) {
-            out[j] = out[j] ^ gfMul(out[j - 1], factor);
+            out[j] = out[j - 1] ^ gfMul(out[j], factor);
         }
         out[0] = gfMul(out[0], factor);
     }
@@ -368,21 +521,18 @@ fn appendBits(buf: *std.ArrayList(u1), allocator: std.mem.Allocator, value: u32,
     }
 }
 
-// --- Matrix Construction ---
+// --- Matrix Construction & Placement ---
 
 const Matrix = struct {
     size: usize,
-    modules: []u8, // 0 = empty/unassigned, 1 = white/light, 2 = black/dark, | 0x80 = function module (reserved)
+    // 0 = unassigned, 1 = light, 2 = dark, 0x80 bit = function module (protected from data/masking)
+    modules: []u8,
     allocator: std.mem.Allocator,
 
     fn init(allocator: std.mem.Allocator, size: usize) !Matrix {
         const modules = try allocator.alloc(u8, size * size);
         @memset(modules, 0);
-        return .{
-            .size = size,
-            .modules = modules,
-            .allocator = allocator,
-        };
+        return .{ .size = size, .modules = modules, .allocator = allocator };
     }
 
     fn deinit(self: *Matrix) void {
@@ -390,7 +540,7 @@ const Matrix = struct {
     }
 
     fn setFunction(self: *Matrix, x: usize, y: usize, is_dark: bool) void {
-        self.modules[y * self.size + x] = (if (is_dark) @as(u8, 2) else 1) | 0x80;
+        self.modules[y * self.size + x] = 0x80 | (if (is_dark) @as(u8, 2) else @as(u8, 1));
     }
 
     fn isFunction(self: Matrix, x: usize, y: usize) bool {
@@ -431,11 +581,9 @@ fn placeAlignmentPattern(matrix: *Matrix, center_x: usize, center_y: usize) void
         while (dx <= 2) : (dx += 1) {
             const x: usize = @intCast(@as(i32, @intCast(center_x)) + dx);
             const y: usize = @intCast(@as(i32, @intCast(center_y)) + dy);
-            if (!matrix.isFunction(x, y)) {
-                const dist = @max(@abs(dx), @abs(dy));
-                const is_dark = (dist != 1);
-                matrix.setFunction(x, y, is_dark);
-            }
+            const dist = @max(@abs(dx), @abs(dy));
+            const is_dark = (dist != 1);
+            matrix.setFunction(x, y, is_dark);
         }
     }
 }
@@ -460,9 +608,12 @@ fn setupFunctionModules(matrix: *Matrix, version: u8) void {
         const positions = ALIGNMENT_PATTERN_POS[version];
         for (positions) |y| {
             for (positions) |x| {
-                if (!matrix.isFunction(x, y)) {
-                    placeAlignmentPattern(matrix, x, y);
-                }
+                // Skip positions that overlap with the three finder patterns
+                if (x == 6 and y == 6) continue;
+                if (x == positions[positions.len - 1] and y == 6) continue;
+                if (x == 6 and y == positions[positions.len - 1]) continue;
+
+                placeAlignmentPattern(matrix, x, y);
             }
         }
     }
@@ -516,17 +667,27 @@ fn writeFormatInfo(matrix: *Matrix, ec: EcLevel, mask: u3) void {
 
     for (0..15) |i| {
         const bit = ((format_bits >> @intCast(i)) & 1) != 0;
+
+        // Top-left copy
         if (i < 6) {
             matrix.set(i, 8, bit);
-        } else if (i < 8) {
-            matrix.set(i + 1, 8, bit);
+        } else if (i == 6) {
+            matrix.set(7, 8, bit);
+        } else if (i == 7) {
+            matrix.set(8, 8, bit);
+        } else if (i == 8) {
+            matrix.set(8, 7, bit);
         } else {
-            matrix.set(8, 15 - i, bit);
+            // i is 9..14 -> rows 5..0 (skipping row 6 timing)
+            matrix.set(8, 14 - i, bit);
         }
 
-        if (i < 8) {
+        // Bottom-left / Top-right copy
+        if (i < 7) {
+            // Bits 0..6 along bottom-left (8, size-1 down to 8, size-7)
             matrix.set(8, size - 1 - i, bit);
         } else {
+            // Bits 7..14 along top-right (size-8, 8 up to size-1, 8)
             matrix.set(size - 15 + i, 8, bit);
         }
     }
@@ -602,30 +763,52 @@ fn evaluatePenalty(matrix: Matrix) u32 {
     for (0..size - 1) |y| {
         for (0..size - 1) |x| {
             const c = matrix.isDark(x, y);
-            if (c == matrix.isDark(x + 1, y) and c == matrix.isDark(x, y + 1) and c == matrix.isDark(x + 1, y + 1)) {
+            if (c == matrix.isDark(x + 1, y) and
+                c == matrix.isDark(x, y + 1) and
+                c == matrix.isDark(x + 1, y + 1))
+            {
                 penalty += 3;
             }
         }
     }
 
+    // Rule 3: 1:1:3:1:1 pattern
+    for (0..size) |y| {
+        for (0..size - 6) |x| {
+            if (matrix.isDark(x, y) and
+                !matrix.isDark(x + 1, y) and
+                matrix.isDark(x + 2, y) and
+                matrix.isDark(x + 3, y) and
+                matrix.isDark(x + 4, y) and
+                !matrix.isDark(x + 5, y) and
+                matrix.isDark(x + 6, y))
+            {
+                // Check for 4 light modules before or after
+                const before_light = (x >= 4) and !matrix.isDark(x - 1, y) and !matrix.isDark(x - 2, y) and !matrix.isDark(x - 3, y) and !matrix.isDark(x - 4, y);
+                const after_light = (x + 11 <= size) and !matrix.isDark(x + 7, y) and !matrix.isDark(x + 8, y) and !matrix.isDark(x + 9, y) and !matrix.isDark(x + 10, y);
+                if (before_light or after_light) penalty += 40;
+            }
+        }
+    }
+
     // Rule 4: Balance of dark and light modules
-    var total_dark: u32 = 0;
+    var dark_count: u32 = 0;
     for (0..size) |y| {
         for (0..size) |x| {
-            if (matrix.isDark(x, y)) total_dark += 1;
+            if (matrix.isDark(x, y)) dark_count += 1;
         }
     }
     const total_modules: u32 = @intCast(size * size);
-    const dark_percent = (total_dark * 100) / total_modules;
-    const diff = if (dark_percent > 50) dark_percent - 50 else 50 - dark_percent;
+    const dark_percent = (dark_count * 100) / total_modules;
+    const diff = if (dark_percent >= 50) dark_percent - 50 else 50 - dark_percent;
     penalty += (diff / 5) * 10;
 
     return penalty;
 }
 
-// --- Top Level Encoding Function ---
+// --- Main Encoder ---
 
-pub fn encodeTextVersion(allocator: std.mem.Allocator, text: []const u8, version: u8, ec: EcLevel) !QrCode {
+fn encodeTextVersion(allocator: std.mem.Allocator, text: []const u8, version: u8, ec: EcLevel) !QrCode {
     const data_codewords = try encodeDataCodewords(allocator, text, version, ec);
     defer allocator.free(data_codewords);
 
@@ -801,7 +984,6 @@ pub fn encodeTextVersion(allocator: std.mem.Allocator, text: []const u8, version
 test "min version determination" {
     try std.testing.expectEqual(@as(?u8, 1), getMinVersion("HELLO".len, .L));
     try std.testing.expectEqual(@as(?u8, 1), getMinVersion("1234567890".len, .M));
-    // ~165 chars fits in version 8 at level L
     const v = getMinVersion(165, .L);
     try std.testing.expect(v != null);
     try std.testing.expect(v.? <= 9);
@@ -820,7 +1002,6 @@ test "QR code encode basic text" {
     defer qr.deinit();
 
     try std.testing.expect(qr.size >= 21);
-    // Finder pattern top-left should have dark corner
     try std.testing.expect(qr.get(0, 0));
     try std.testing.expect(qr.get(6, 0));
     try std.testing.expect(!qr.get(7, 0));
@@ -836,4 +1017,12 @@ test "QR code encode whatsapp pairing payload" {
     const term_str = try qr.renderTerminal(allocator);
     defer allocator.free(term_str);
     try std.testing.expect(term_str.len > 0);
+
+    const svg_str = try qr.renderSvg(allocator);
+    defer allocator.free(svg_str);
+    try std.testing.expect(svg_str.len > 0);
+
+    const html_str = try qr.renderHtml(allocator, wa_payload);
+    defer allocator.free(html_str);
+    try std.testing.expect(html_str.len > 0);
 }

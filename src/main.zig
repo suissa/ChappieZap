@@ -68,7 +68,6 @@ fn handleEvent(event: whatszig.Event, ctx: *anyopaque) void {
         .qr_code => |qr| {
             qr_count += 1;
             if (qr_count == 1) {
-                // Show only the first QR code (valid for ~60 seconds)
                 log.info("Main", "", .{});
                 log.info("Main", "Scan this QR code with WhatsApp on your phone:", .{});
                 log.info("Main", "WhatsApp > Linked Devices > Link a Device", .{});
@@ -76,12 +75,17 @@ fn handleEvent(event: whatszig.Event, ctx: *anyopaque) void {
                 if (whatszig.qr.QrCode.encodeText(client.allocator, qr.code, .L)) |qr_matrix| {
                     var mut_qr = qr_matrix;
                     defer mut_qr.deinit();
+
+                    // 1. Render in terminal
                     if (mut_qr.renderTerminal(client.allocator)) |rendered| {
                         defer client.allocator.free(rendered);
                         std.debug.print("{s}", .{rendered});
                     } else |_| {
                         log.info("Main", "{s}", .{qr.code});
                     }
+
+                    // 2. Save qrcode.html
+                    saveQrCodeHtml(client.allocator, client.io, mut_qr, qr.code);
                 } else |_| {
                     log.info("Main", "{s}", .{qr.code});
                 }
@@ -133,4 +137,16 @@ fn handleEvent(event: whatszig.Event, ctx: *anyopaque) void {
         .disconnected => log.warn("Main", "Disconnected", .{}),
         .login_failed => log.err("Main", "Login failed", .{}),
     }
+}
+
+fn saveQrCodeHtml(allocator: std.mem.Allocator, io: std.Io, qr: whatszig.qr.QrCode, raw_code: []const u8) void {
+    if (qr.renderHtml(allocator, raw_code)) |html| {
+        defer allocator.free(html);
+
+        if (std.Io.Dir.cwd().createFile(io, "qrcode.html", .{})) |file| {
+            defer file.close(io);
+            file.writePositionalAll(io, html, 0) catch {};
+            log.info("Main", "QR Code HTML salvo em: qrcode.html (abra no navegador para escanear)", .{});
+        } else |_| {}
+    } else |_| {}
 }
