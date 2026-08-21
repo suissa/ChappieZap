@@ -25,7 +25,7 @@ pub fn main(init: std.process.Init) !void {
     client.connectAndRun() catch |err| {
         log.err("Main", "{}", .{err});
         if (@errorReturnTrace()) |trace| {
-            std.debug.dumpStackTrace(trace);
+            std.debug.dumpErrorReturnTrace(trace);
         }
     };
 }
