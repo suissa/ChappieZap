@@ -13,8 +13,13 @@ pub fn handlePairingFlow(self: anytype) !void {
     log.info("Client", "Waiting for pairing...", .{});
     var pair_sign_sent = false;
 
-    if (self.options.pairing_phone_number) |raw_phone| {
-        try startPairCodeFlow(self, raw_phone);
+    if (self.options.pairing_mode == .paircode) {
+        if (self.options.pairing_phone_number) |raw_phone| {
+            try startPairCodeFlow(self, raw_phone);
+        } else {
+            log.warn("Client", "paircode mode requires a phone number. Use: whatszig <phone> paircode", .{});
+            return error.PhoneNumberRequired;
+        }
     }
 
     return client_pump.pumpUntil(self, 60_000, struct {
@@ -27,8 +32,10 @@ pub fn handlePairingFlow(self: anytype) !void {
             }
 
             if (std.mem.eql(u8, node.tag, "notification")) {
-                if (pair_code_mod.parsePrimaryHelloNotification(node)) |ph| {
-                    try handlePrimaryHello(client, ph);
+                if (client.options.pairing_mode == .paircode) {
+                    if (pair_code_mod.parsePrimaryHelloNotification(node)) |ph| {
+                        try handlePrimaryHello(client, ph);
+                    }
                 }
                 client.processNode(node);
                 return .keep_going;
@@ -36,18 +43,22 @@ pub fn handlePairingFlow(self: anytype) !void {
 
             if (std.mem.eql(u8, node.tag, "iq")) {
                 var handled = false;
-                if (pair_code_mod.parseCompanionHelloResponse(node)) |pref| {
-                    handled = true;
-                    if (client.pair_code_ref) |old| client.allocator.free(old);
-                    client.pair_code_ref = try client.allocator.dupe(u8, pref);
-                    log.debug("Client/PairCode", "Received pairing ref ({d} bytes)", .{pref.len});
+                if (client.options.pairing_mode == .paircode) {
+                    if (pair_code_mod.parseCompanionHelloResponse(node)) |pref| {
+                        handled = true;
+                        if (client.pair_code_ref) |old| client.allocator.free(old);
+                        client.pair_code_ref = try client.allocator.dupe(u8, pref);
+                        log.debug("Client/PairCode", "Received pairing ref ({d} bytes)", .{pref.len});
+                    }
                 }
 
                 if (node.getContentNodes()) |children| {
                     for (children) |*child| {
                         if (std.mem.eql(u8, child.tag, "pair-device")) {
                             handled = true;
-                            emitQrCodes(client, child);
+                            if (client.options.pairing_mode == .qrcode) {
+                                emitQrCodes(client, child);
+                            }
                             client_transport.sendIqResult(
                                 client,
                                 node.getAttribute("id"),

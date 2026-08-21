@@ -21,14 +21,34 @@ pub fn main(init: std.process.Init) !void {
     defer args_it.deinit();
     _ = args_it.skip(); // skip executable name
 
+    // Usage:
+    //   whatszig                           -> QR code mode (no phone)
+    //   whatszig <phone>                   -> QR code mode with phone (default)
+    //   whatszig <phone> qrcode            -> QR code mode
+    //   whatszig <phone> paircode          -> Phone pairing code mode
     var pairing_phone: ?[]const u8 = null;
-    if (args_it.next()) |arg| {
-        pairing_phone = arg;
-        log.info("Main", "Pairing phone number specified: {s}", .{arg});
+    var pairing_mode: whatszig.PairingMode = .qrcode;
+
+    if (args_it.next()) |phone_arg| {
+        pairing_phone = phone_arg;
+        log.info("Main", "Phone number: {s}", .{phone_arg});
+
+        if (args_it.next()) |mode_arg| {
+            if (std.mem.eql(u8, mode_arg, "paircode")) {
+                pairing_mode = .paircode;
+            } else if (std.mem.eql(u8, mode_arg, "qrcode")) {
+                pairing_mode = .qrcode;
+            } else {
+                log.warn("Main", "Unknown mode '{s}', defaulting to qrcode. Use 'qrcode' or 'paircode'.", .{mode_arg});
+            }
+        }
     }
+
+    log.info("Main", "Pairing mode: {s}", .{@tagName(pairing_mode)});
 
     var client = try whatszig.Client.init(allocator, io, .{
         .pairing_phone_number = pairing_phone,
+        .pairing_mode = pairing_mode,
         .on_event = handleEvent,
     });
     defer client.deinit();

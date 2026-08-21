@@ -1,5 +1,6 @@
 pub const Client = @import("client").Client;
 pub const ClientOptions = @import("client").ClientOptions;
+pub const PairingMode = @import("client").PairingMode;
 pub const Event = @import("events").Event;
 pub const EventHandler = @import("events").EventHandler;
 pub const AddressBook = @import("addressing").AddressBook;

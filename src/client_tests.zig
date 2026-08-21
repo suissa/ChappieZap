@@ -191,3 +191,177 @@ test "integration: phone number pairing full end-to-end cryptographic handshake"
     try std.testing.expectEqualSlices(u8, &companion_identity.public_key, decrypted_bundle[0..32]);
     try std.testing.expectEqualSlices(u8, &primary_identity.public_key, decrypted_bundle[32..64]);
 }
+
+// -----------------------------------------------------------------------
+// Paircode mode parameter tests
+// -----------------------------------------------------------------------
+
+test "paircode mode: default pairing_mode is qrcode" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    var client = try client_mod.Client.init(allocator, io, .{});
+    defer client.deinit();
+
+    try std.testing.expectEqual(client_mod.PairingMode.qrcode, client.options.pairing_mode);
+}
+
+test "paircode mode: can set pairing_mode to paircode" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    var client = try client_mod.Client.init(allocator, io, .{
+        .pairing_mode = .paircode,
+        .pairing_phone_number = "5515991957645",
+    });
+    defer client.deinit();
+
+    try std.testing.expectEqual(client_mod.PairingMode.paircode, client.options.pairing_mode);
+    try std.testing.expectEqualStrings("5515991957645", client.options.pairing_phone_number.?);
+}
+
+test "paircode mode: phone sanitization strips non-digits" {
+    const pair_code_mod = @import("pair_code");
+    var buf: [32]u8 = undefined;
+
+    // Various user input formats should all produce the same digits
+    try std.testing.expectEqualStrings("5515991957645",
+        pair_code_mod.PairCodeUtils.sanitizePhoneNumber("+55 (15) 99195-7645", &buf));
+
+    var buf2: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("5515991957645",
+        pair_code_mod.PairCodeUtils.sanitizePhoneNumber("5515991957645", &buf2));
+
+    var buf3: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("5515991957645",
+        pair_code_mod.PairCodeUtils.sanitizePhoneNumber("+55-15-99195-7645", &buf3));
+
+    // Empty / invalid
+    var buf4: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("",
+        pair_code_mod.PairCodeUtils.sanitizePhoneNumber("", &buf4));
+}
+
+test "paircode mode: generated code is 8 chars Crockford Base32 and valid" {
+    const io = std.testing.io;
+    const pair_code_mod = @import("pair_code");
+
+    const code = pair_code_mod.PairCodeUtils.generateCode(io);
+    try std.testing.expectEqual(@as(usize, 8), code.len);
+    try std.testing.expect(pair_code_mod.PairCodeUtils.validateCode(&code));
+
+    // All chars must be in the Crockford alphabet
+    const alphabet = "0123456789ABCDEFGHJKLMNPQRSTVWXYZ";
+    for (code) |c| {
+        const found = std.mem.indexOfScalar(u8, alphabet, c) != null;
+        try std.testing.expect(found);
+    }
+}
+
+test "paircode mode: formatted code is XXXX-XXXX (9 chars with dash at index 4)" {
+    const io = std.testing.io;
+    const pair_code_mod = @import("pair_code");
+
+    const code = pair_code_mod.PairCodeUtils.generateCode(io);
+    var fmt_buf: [9]u8 = undefined;
+    const formatted = pair_code_mod.PairCodeUtils.formatCode(&code, &fmt_buf);
+
+    try std.testing.expectEqual(@as(usize, 9), formatted.len);
+    try std.testing.expectEqual(@as(u8, '-'), formatted[4]);
+    // First 4 chars == first 4 of code, last 4 == last 4 of code
+    try std.testing.expectEqualSlices(u8, code[0..4], formatted[0..4]);
+    try std.testing.expectEqualSlices(u8, code[4..8], formatted[5..9]);
+}
+
+test "paircode mode: companion_hello IQ has correct structure" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const pair_code_mod = @import("pair_code");
+    const X25519 = std.crypto.dh.X25519;
+
+    const phone = "5515991957645";
+    const code = pair_code_mod.PairCodeUtils.generateCode(io);
+    const eph = X25519.KeyPair.generate(io);
+    const noise_static = X25519.KeyPair.generate(io);
+    const wrapped = pair_code_mod.PairCodeUtils.encryptEphemeralPub(eph.public_key, &code, io);
+
+    var iq = try pair_code_mod.buildCompanionHelloIq(
+        allocator, phone, &noise_static.public_key, &wrapped, "iq-hello-test",
+    );
+    defer iq.deinit();
+
+    try std.testing.expectEqualStrings("iq", iq.tag);
+    try std.testing.expectEqualStrings("set", iq.getAttribute("type").?);
+    try std.testing.expectEqualStrings("s.whatsapp.net", iq.getAttribute("to").?);
+    try std.testing.expectEqualStrings("iq-hello-test", iq.getAttribute("id").?);
+    try std.testing.expectEqualStrings("md", iq.getAttribute("xmlns").?);
+}
+
+test "paircode mode: companion_finish IQ has correct structure" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const pair_code_mod = @import("pair_code");
+    const X25519 = std.crypto.dh.X25519;
+
+    const phone = "5515991957645";
+    const code = pair_code_mod.PairCodeUtils.generateCode(io);
+    const companion_eph = X25519.KeyPair.generate(io);
+    const companion_id = X25519.KeyPair.generate(io);
+    const primary_eph = X25519.KeyPair.generate(io);
+    const primary_id = X25519.KeyPair.generate(io);
+
+    const wrapped_primary = pair_code_mod.PairCodeUtils.encryptEphemeralPub(primary_eph.public_key, &code, io);
+    const decrypted_primary = try pair_code_mod.PairCodeUtils.decryptPrimaryEphemeralPub(&wrapped_primary, &code);
+
+    const bundle = try pair_code_mod.PairCodeUtils.prepareKeyBundle(
+        companion_eph.secret_key,
+        companion_id.secret_key,
+        companion_id.public_key,
+        decrypted_primary,
+        primary_id.public_key,
+        io,
+    );
+
+    var iq = try pair_code_mod.buildCompanionFinishIq(
+        allocator, phone, &bundle.wrapped_bundle, &companion_id.public_key,
+        "test-ref-abc", "iq-finish-test",
+    );
+    defer iq.deinit();
+
+    try std.testing.expectEqualStrings("iq", iq.tag);
+    try std.testing.expectEqualStrings("set", iq.getAttribute("type").?);
+    try std.testing.expectEqualStrings("iq-finish-test", iq.getAttribute("id").?);
+}
+
+test "paircode mode: ephemeral pub encrypt/decrypt roundtrip" {
+    const io = std.testing.io;
+    const pair_code_mod = @import("pair_code");
+    const X25519 = std.crypto.dh.X25519;
+
+    const code = pair_code_mod.PairCodeUtils.generateCode(io);
+    const eph = X25519.KeyPair.generate(io);
+
+    const wrapped = pair_code_mod.PairCodeUtils.encryptEphemeralPub(eph.public_key, &code, io);
+    try std.testing.expectEqual(@as(usize, 80), wrapped.len);
+
+    const decrypted = try pair_code_mod.PairCodeUtils.decryptPrimaryEphemeralPub(&wrapped, &code);
+    try std.testing.expectEqualSlices(u8, &eph.public_key, &decrypted);
+}
+
+test "paircode mode: wrong code fails decryption" {
+    const io = std.testing.io;
+    const pair_code_mod = @import("pair_code");
+    const X25519 = std.crypto.dh.X25519;
+
+    const code = pair_code_mod.PairCodeUtils.generateCode(io);
+    const wrong_code = pair_code_mod.PairCodeUtils.generateCode(io);
+    const eph = X25519.KeyPair.generate(io);
+
+    const wrapped = pair_code_mod.PairCodeUtils.encryptEphemeralPub(eph.public_key, &code, io);
+
+    // Decrypting with the wrong code must fail (wrong key = wrong PBKDF2 → corrupt AES-256-CTR output)
+    const bad_decrypted = try pair_code_mod.PairCodeUtils.decryptPrimaryEphemeralPub(&wrapped, &wrong_code);
+    // The decryption itself won't error (CTR has no auth tag), but the result must differ
+    const matches = std.mem.eql(u8, &eph.public_key, &bad_decrypted);
+    try std.testing.expect(!matches);
+}

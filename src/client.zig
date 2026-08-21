@@ -24,6 +24,11 @@ pub const auth = auth_flow;
 pub const payloads = payloads_mod;
 pub const transport = wire_transport;
 
+pub const PairingMode = enum {
+    qrcode,
+    paircode,
+};
+
 pub const ClientOptions = struct {
     host: []const u8 = "web.whatsapp.com",
     port: u16 = 443,
@@ -31,6 +36,7 @@ pub const ClientOptions = struct {
     tls_ca_cert_path: ?[]const u8 = null,
     path: []const u8 = "/ws/chat",
     push_name: []const u8 = "whatszig",
+    pairing_mode: PairingMode = .qrcode,
     pairing_phone_number: ?[]const u8 = null,
     experimental_post_login_init: bool = false,
     on_event: ?EventHandler = null,
