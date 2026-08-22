@@ -250,7 +250,7 @@ pub const Client = struct {
     /// Send a text message to a JID. Handles session management automatically:
     /// fetches prekeys and establishes a session if needed, then encrypts and sends.
     pub fn sendMessage(self: *Client, to_jid: []const u8, text: []const u8) !void {
-        if (self.address_book.isSelfChatJid(to_jid) and self.address_book.ownDeviceCount() != 0) {
+        if (self.address_book.isSelfChatJid(to_jid)) {
             return send_fanout.sendSelfChatFanout(self, to_jid, text);
         }
         return send_fanout.sendDirectMessageFanout(self, to_jid, text);

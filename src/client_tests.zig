@@ -365,3 +365,51 @@ test "paircode mode: wrong code fails decryption" {
     const matches = std.mem.eql(u8, &eph.public_key, &bad_decrypted);
     try std.testing.expect(!matches);
 }
+
+test "AddressBook: own_phone_jid and own_lid_jid remain valid after many mappings are added" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client = try client_mod.Client.init(allocator, io, .{});
+    defer client.deinit();
+
+    try client.address_book.setOwnIdentity("5515991957645@s.whatsapp.net", "124953718435910@lid", 52);
+
+    // Add many new mappings that force BufMap internal reallocations
+    var i: usize = 0;
+    while (i < 100) : (i += 1) {
+        var pn_buf: [64]u8 = undefined;
+        var lid_buf: [64]u8 = undefined;
+        const pn = try std.fmt.bufPrint(&pn_buf, "551199999{d:0>4}@s.whatsapp.net", .{i});
+        const lid = try std.fmt.bufPrint(&lid_buf, "1000000000{d:0>4}@lid", .{i});
+        _ = try client.address_book.rememberMappingJids(pn, lid);
+    }
+
+    // Ensure own_phone_jid and own_lid_jid are still 100% valid and valid UTF-8
+    const phone = client.address_book.phoneJid() orelse return error.MissingPhone;
+    const lid = client.address_book.lidJid() orelse return error.MissingLid;
+
+    try std.testing.expect(std.unicode.utf8ValidateSlice(phone));
+    try std.testing.expect(std.unicode.utf8ValidateSlice(lid));
+    try std.testing.expectEqualStrings("5515991957645@s.whatsapp.net", phone);
+    try std.testing.expectEqualStrings("124953718435910@lid", lid);
+}
+
+test "integration: self-chat JID detection and resolution for LID companion chat" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client = try client_mod.Client.init(allocator, io, .{});
+    defer client.deinit();
+
+    try client.address_book.setOwnIdentity("5515991957645@s.whatsapp.net", "124953718435910@lid", 52);
+
+    // Incoming message from self via LID companion device: 124953718435910:50@lid
+    const is_self = client.address_book.isSelfChatJid("124953718435910:50@lid");
+    try std.testing.expect(is_self);
+
+    // Resolve LID to phone JID
+    const resolved = try client.address_book.resolvePhoneJid("124953718435910:50@lid");
+    defer resolved.deinit(allocator);
+    try std.testing.expectEqualStrings("5515991957645:50@s.whatsapp.net", resolved.value);
+}
