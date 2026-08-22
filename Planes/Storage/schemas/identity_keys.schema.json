@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WhatsmeowIdentityKeys",
+  "type": "object",
+  "properties": {
+    "our_jid": {
+      "type": "string"
+    },
+    "their_id": {
+      "type": "string"
+    },
+    "identity": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "description": "32-byte Signal public identity key"
+    }
+  },
+  "required": ["our_jid", "their_id", "identity"]
+}

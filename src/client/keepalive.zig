@@ -1,9 +1,9 @@
 const std = @import("std");
 
-pub const keep_alive_interval_min = std.Io.Duration.fromSeconds(15);
-pub const keep_alive_interval_max = std.Io.Duration.fromSeconds(30);
-pub const keep_alive_response_deadline = std.Io.Duration.fromSeconds(20);
-pub const dead_socket_time = std.Io.Duration.fromSeconds(20);
+pub const keep_alive_interval_min = std.Io.Duration.fromSeconds(200);
+pub const keep_alive_interval_max = std.Io.Duration.fromSeconds(400);
+pub const keep_alive_response_deadline = std.Io.Duration.fromSeconds(300);
+pub const dead_socket_time = std.Io.Duration.fromSeconds(900);
 
 pub fn randomInterval(io: std.Io) std.Io.Duration {
     var bytes: [4]u8 = undefined;
@@ -35,7 +35,7 @@ pub fn isDeadSocket(
 }
 
 test "dead socket matches send without receive" {
-    const now = std.Io.Timestamp.fromNanoseconds(std.time.ns_per_s * 30);
+    const now = std.Io.Timestamp.fromNanoseconds(std.time.ns_per_s * 100);
     const last_sent = std.Io.Timestamp.fromNanoseconds(0);
     const last_received = std.Io.Timestamp.zero;
 

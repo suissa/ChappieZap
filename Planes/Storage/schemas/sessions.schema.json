@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WhatsmeowSessions",
+  "type": "object",
+  "properties": {
+    "our_jid": {
+      "type": "string"
+    },
+    "their_id": {
+      "type": "string"
+    },
+    "session": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "description": "Serialized Signal session state"
+    }
+  },
+  "required": ["our_jid", "their_id", "session"]
+}

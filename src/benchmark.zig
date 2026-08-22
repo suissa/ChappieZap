@@ -55,7 +55,7 @@ pub fn main(init: std.process.Init) !void {
     client.connectAndRun() catch |err| {
         log.err("Benchmark", "{}", .{err});
         if (@errorReturnTrace()) |trace| {
-            std.debug.dumpStackTrace(trace);
+            std.debug.dumpErrorReturnTrace(trace);
         }
     };
 }
@@ -69,6 +69,9 @@ fn handleEvent(event: whatszig.Event, ctx: *anyopaque) void {
             if (qr_count == 1) {
                 log.info("Benchmark", "QR: {s}", .{qr.code});
             }
+        },
+        .pairing_code => |pc| {
+            log.info("Benchmark", "Pairing Code for {s}: {s}", .{ pc.phone, pc.formatted_code });
         },
         .pair_success => |ps| {
             log.info("Benchmark", "Paired! phone={s} lid={s}", .{ ps.phone_jid, ps.lid });
