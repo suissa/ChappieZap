@@ -1,5 +1,1 @@
-```
-zig-cache/
-*.o
-*.obj
-```
+*.log
