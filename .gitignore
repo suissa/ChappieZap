@@ -1,5 +1,7 @@
 ```
+# Zig build artifacts
 zig-cache/
+zig-out/
 *.o
 *.obj
 *.exe
@@ -7,4 +9,40 @@ zig-cache/
 *.so
 *.a
 *.out
+
+# Dependencies
+.zig-cache/
+deps/
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+
+# Environment
+.env
+.env.local
+*.env.*
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Coverage
+coverage/
+htmlcov/
+.coverage
+
+# Python cache (if any Python files exist in project)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
 ```

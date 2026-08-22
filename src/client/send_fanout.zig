@@ -109,6 +109,7 @@ pub fn sendSelfChatFanout(self: anytype, chat_jid: []const u8, text: []const u8)
 }
 
 pub fn sendDirectMessageFanout(self: anytype, chat_jid: []const u8, text: []const u8) !void {
+    std.log.scoped(.SendFanout).info("sendDirectMessageFanout START to {s}", .{chat_jid});
     const msg_id_arr = messaging.generateMessageId(self.io);
     const reporting = try messaging.generateReportingContextForText(
         self.allocator,
@@ -144,26 +145,42 @@ pub fn sendDirectMessageFanout(self: anytype, chat_jid: []const u8, text: []cons
     defer if (recipient_target_owned) |owned| self.allocator.free(owned);
 
     if (self.options.tls) {
+        std.log.scoped(.SendFanout).debug("TLS mode enabled, ensuring LID mapping for {s}", .{chat_jid});
         try ensureRecipientLidMapping(self, chat_jid);
         const resolved_recipient = try self.address_book.resolveEncryptionJid(chat_jid);
         recipient_target = resolved_recipient.value;
         recipient_target_owned = resolved_recipient.owned;
+        std.log.scoped(.SendFanout).debug("Resolved recipient target: {s}", .{recipient_target});
     }
 
     const recipient_bare = try bareJid(self, recipient_target);
     defer self.allocator.free(recipient_bare);
     try recipient_targets.append(self.allocator, recipient_bare);
+    std.log.scoped(.SendFanout).debug("Recipient targets count: {d}", .{recipient_targets.items.len});
 
     if (self.address_book.phoneJid()) |own_phone| {
+        std.log.scoped(.SendFanout).debug("Adding own phone JID to targets: {s}", .{own_phone});
         try own_targets.append(self.allocator, own_phone);
     }
     var own_it = self.address_book.ownDeviceIterator();
     while (own_it.next()) |jid_ptr| {
-        if (std.mem.eql(u8, jid_ptr.*, chat_jid)) continue;
-        if (self.address_book.isCurrentDeviceJid(jid_ptr.*)) continue;
-        if (jid_helpers.containsJid(own_targets.items, jid_ptr.*)) continue;
+        std.log.scoped(.SendFanout).debug("Checking own device JID: {s}", .{jid_ptr.*});
+        if (std.mem.eql(u8, jid_ptr.*, chat_jid)) {
+            std.log.scoped(.SendFanout).debug("Skipping - equals chat_jid");
+            continue;
+        }
+        if (self.address_book.isCurrentDeviceJid(jid_ptr.*)) {
+            std.log.scoped(.SendFanout).debug("Skipping - is current device JID");
+            continue;
+        }
+        if (jid_helpers.containsJid(own_targets.items, jid_ptr.*)) {
+            std.log.scoped(.SendFanout).debug("Skipping - already in targets");
+            continue;
+        }
         try own_targets.append(self.allocator, jid_ptr.*);
+        std.log.scoped(.SendFanout).debug("Added to own_targets: {s}", .{jid_ptr.*});
     }
+    std.log.scoped(.SendFanout).debug("Own targets count: {d}", .{own_targets.items.len});
 
     var participants = std.ArrayList(messaging.DirectParticipant).empty;
     defer {
@@ -176,7 +193,9 @@ pub fn sendDirectMessageFanout(self: anytype, chat_jid: []const u8, text: []cons
 
     var any_prekey = false;
 
+    std.log.scoped(.SendFanout).debug("Processing {d} recipient targets", .{recipient_targets.items.len});
     for (recipient_targets.items) |participant_jid| {
+        std.log.scoped(.SendFanout).debug("Encrypting for recipient target: {s}", .{participant_jid});
         var encryption_jid = participant_jid;
         var encryption_jid_owned: ?[]u8 = null;
         defer if (encryption_jid_owned) |owned| self.allocator.free(owned);
@@ -184,6 +203,7 @@ pub fn sendDirectMessageFanout(self: anytype, chat_jid: []const u8, text: []cons
             const resolved = try self.address_book.resolveEncryptionJid(participant_jid);
             encryption_jid = resolved.value;
             encryption_jid_owned = resolved.owned;
+            std.log.scoped(.SendFanout).debug("Resolved encryption JID: {s}", .{encryption_jid});
         }
         const payload = try encryptPayloadForFanoutTarget(
             self,
@@ -193,6 +213,7 @@ pub fn sendDirectMessageFanout(self: anytype, chat_jid: []const u8, text: []cons
         );
         errdefer self.allocator.free(payload.ciphertext);
         any_prekey = any_prekey or payload.is_prekey;
+        std.log.scoped(.SendFanout).debug("Encrypted payload for {s} ({d} bytes, prekey={any})", .{ participant_jid, payload.ciphertext.len, payload.is_prekey });
         try participants.append(self.allocator, .{
             .jid = payload.route_jid,
             .jid_owned = payload.route_jid_owned,
@@ -201,8 +222,13 @@ pub fn sendDirectMessageFanout(self: anytype, chat_jid: []const u8, text: []cons
         });
     }
 
+    std.log.scoped(.SendFanout).debug("Processing {d} own targets", .{own_targets.items.len});
     for (own_targets.items) |participant_jid| {
-        if (self.address_book.isCurrentDeviceJid(participant_jid)) continue;
+        std.log.scoped(.SendFanout).debug("Checking own target: {s}", .{participant_jid});
+        if (self.address_book.isCurrentDeviceJid(participant_jid)) {
+            std.log.scoped(.SendFanout).debug("Skipping - is current device");
+            continue;
+        }
         var encryption_jid = participant_jid;
         var encryption_jid_owned: ?[]u8 = null;
         defer if (encryption_jid_owned) |owned| self.allocator.free(owned);
@@ -210,6 +236,7 @@ pub fn sendDirectMessageFanout(self: anytype, chat_jid: []const u8, text: []cons
             const resolved = try self.address_book.resolveOwnDeviceEncryptionJid(participant_jid);
             encryption_jid = resolved.value;
             encryption_jid_owned = resolved.owned;
+            std.log.scoped(.SendFanout).debug("Resolved own encryption JID: {s}", .{encryption_jid});
         }
         const payload = try encryptPayloadForFanoutTarget(
             self,
@@ -219,6 +246,7 @@ pub fn sendDirectMessageFanout(self: anytype, chat_jid: []const u8, text: []cons
         );
         errdefer self.allocator.free(payload.ciphertext);
         any_prekey = any_prekey or payload.is_prekey;
+        std.log.scoped(.SendFanout).debug("Encrypted payload for own target {s} ({d} bytes, prekey={any})", .{ participant_jid, payload.ciphertext.len, payload.is_prekey });
         try participants.append(self.allocator, .{
             .jid = payload.route_jid,
             .jid_owned = payload.route_jid_owned,
@@ -226,6 +254,7 @@ pub fn sendDirectMessageFanout(self: anytype, chat_jid: []const u8, text: []cons
             .is_prekey = payload.is_prekey,
         });
     }
+    std.log.scoped(.SendFanout).info("Total participants for fanout: {d}", .{participants.items.len});
 
     if (participants.items.len == 0) {
         // No participants for fanout - send directly using single-recipient path
