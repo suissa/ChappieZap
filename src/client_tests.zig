@@ -413,3 +413,29 @@ test "integration: self-chat JID detection and resolution for LID companion chat
     defer resolved.deinit(allocator);
     try std.testing.expectEqualStrings("5515991957645:50@s.whatsapp.net", resolved.value);
 }
+
+test "buildLoginPayload correctly extracts username when phone_jid has companion device suffix" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client = try client_mod.Client.init(allocator, io, .{});
+    defer client.deinit();
+
+    client.phone_jid = try allocator.dupe(u8, "5515991957645:53@s.whatsapp.net");
+    client.device_id = 53;
+    defer {
+        allocator.free(client.phone_jid.?);
+        client.phone_jid = null;
+    }
+
+    const payload_bytes = try client_mod.payloads.buildLoginPayload(&client);
+    defer allocator.free(payload_bytes);
+
+    var reader: std.Io.Reader = .fixed(payload_bytes);
+    var payload = try whatsapp.ClientPayload.decode(&reader, allocator);
+    defer payload.deinit(allocator);
+
+    try std.testing.expect(payload.passive.?);
+    try std.testing.expectEqual(@as(?u64, 5515991957645), payload.username);
+    try std.testing.expectEqual(@as(?u32, 53), payload.device);
+}

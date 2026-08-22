@@ -38,6 +38,7 @@ pub const ClientOptions = struct {
     push_name: []const u8 = "whatszig",
     pairing_mode: PairingMode = .qrcode,
     pairing_phone_number: ?[]const u8 = null,
+    pairing_timeout_ms: u32 = 600_000,
     experimental_post_login_init: bool = false,
     on_event: ?EventHandler = null,
     event_context: ?*anyopaque = null,

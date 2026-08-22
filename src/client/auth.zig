@@ -22,7 +22,7 @@ pub fn handlePairingFlow(self: anytype) !void {
         }
     }
 
-    return client_pump.pumpUntil(self, 60_000, struct {
+    return client_pump.pumpUntil(self, self.options.pairing_timeout_ms, struct {
         fn onNode(client: @TypeOf(self), pair_sent: *bool, node: *binary.Node) !client_pump.PumpResult {
             if (std.mem.eql(u8, node.tag, "failure")) return error.ServerRejected;
 
