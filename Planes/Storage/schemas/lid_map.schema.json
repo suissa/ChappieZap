@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WhatsmeowLidMap",
+  "type": "object",
+  "properties": {
+    "lid": {
+      "type": "string",
+      "description": "LID (e.g. 124953718435910)"
+    },
+    "pn": {
+      "type": "string",
+      "description": "Phone number (e.g. 5515991957645)"
+    }
+  },
+  "required": ["lid", "pn"]
+}
