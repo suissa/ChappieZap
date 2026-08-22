@@ -106,37 +106,59 @@ fn handleEvent(event: whatszig.Event, ctx: *anyopaque) void {
             log.info("Main", "Paired! phone={s} lid={s}", .{ ps.phone_jid, ps.lid });
         },
         .connected => |c| {
-            log.info("Main", "Connected! phone={s} lid={s}", .{ c.phone_jid, c.lid });
-            log.info("Main", "Listening for messages... Send 🦎ping to get pong", .{});
-        },
-        .message => |msg| {
-            log.info("Main", "Message from {s}", .{msg.from});
+            log.info("Main", "", .{});
+            log.info("Main", "====================================================", .{});
+            log.info("Main", "✅ CONECTADO AO WHATSAPP!", .{});
+            log.info("Main", "  Número: {s}", .{c.phone_jid});
+            log.info("Main", "  LID:    {s}", .{c.lid});
+            log.info("Main", "====================================================", .{});
+            log.info("Main", "", .{});
 
-            if (msg.getBody()) |body| {
-                log.info("Main", "  body: {s}", .{body});
-                // Reply to 🦎ping with pong
-                if (std.mem.indexOf(u8, body, "\xf0\x9f\xa6\x8eping")) |_| {
-                    log.info("Main", "Got 🦎ping! Sending pong to {s}...", .{msg.chat});
-                    client.sendMessage(msg.chat, "pong") catch |err| {
-                        log.err("Main", "Reply failed: {}", .{err});
-                    };
-                }
-            } else {
-                // Check for undecrypted enc nodes
-                if (msg.node.getContentNodes()) |children| {
-                    for (children) |*child| {
-                        if (std.mem.eql(u8, child.tag, "enc")) {
-                            log.debug("Main", "  encrypted (undecrypted) type={s}", .{
-                                child.getAttribute("type") orelse "?",
-                            });
-                        }
-                    }
-                }
+            // Envio automático de validação para os números solicitados
+            sendValidationMessage(client, "5515997676610@s.whatsapp.net", "⚡ [WhatsZig] Conexão iniciada com sucesso! Teste de envio.");
+            if (c.phone_jid.len > 0) {
+                sendValidationMessage(client, c.phone_jid, "⚡ [WhatsZig] Sessão conectada com sucesso! Envie 'ping' ou qualquer mensagem para testar o recebimento.");
             }
         },
-        .disconnected => log.warn("Main", "Disconnected", .{}),
-        .login_failed => log.err("Main", "Login failed", .{}),
+        .message => |msg| {
+            if (msg.getBody()) |body| {
+                log.info("Main", "", .{});
+                log.info("Main", "┌──────────────────────────────────────────────────────────", .{});
+                log.info("Main", "│ 📩 MENSAGEM RECEBIDA", .{});
+                log.info("Main", "│ De:    {s}", .{msg.from});
+                log.info("Main", "│ Chat:  {s}", .{msg.chat});
+                log.info("Main", "│ ID:    {s}", .{msg.id});
+                log.info("Main", "│ Texto: \"{s}\"", .{body});
+                log.info("Main", "└──────────────────────────────────────────────────────────", .{});
+                log.info("Main", "", .{});
+
+                // Resposta automática se receber ping
+                if (std.mem.indexOf(u8, body, "ping") != null or std.mem.indexOf(u8, body, "Ping") != null) {
+                    sendValidationMessage(client, msg.chat, "🦎 pong! Resposta automática do WhatsZig.");
+                }
+            } else {
+                log.info("Main", "📩 [SISTEMA/SYNC] Mensagem de protocolo recebida de: {s}", .{msg.from});
+            }
+        },
+        .disconnected => {
+            log.warn("Main", "⚠️ Desconectado do WhatsApp", .{});
+        },
+        .login_failed => log.err("Main", "❌ Falha no login", .{}),
     }
+}
+
+fn sendValidationMessage(client: *whatszig.Client, to_jid: []const u8, text: []const u8) void {
+    log.info("Main", "┌──────────────────────────────────────────────────────────", .{});
+    log.info("Main", "│ 📤 ENVIANDO MENSAGEM", .{});
+    log.info("Main", "│ Para:  {s}", .{to_jid});
+    log.info("Main", "│ Texto: \"{s}\"", .{text});
+    log.info("Main", "└──────────────────────────────────────────────────────────", .{});
+
+    client.sendMessage(to_jid, text) catch |err| {
+        log.err("Main", "❌ Falha ao enviar mensagem para {s}: {}", .{ to_jid, err });
+        return;
+    };
+    log.info("Main", "✅ Mensagem enviada com sucesso para {s}", .{to_jid});
 }
 
 fn saveQrCodeHtml(allocator: std.mem.Allocator, io: std.Io, qr: whatszig.qr.QrCode, raw_code: []const u8) void {
