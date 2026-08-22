@@ -229,9 +229,12 @@ pub fn sendDirectMessageFanout(self: anytype, chat_jid: []const u8, text: []cons
 
     if (participants.items.len == 0) {
         // No participants for fanout - send directly using single-recipient path
+        std.log.scoped(.SendFanout).warn("No participants for fanout to {s}, sending via single-recipient path", .{chat_jid});
         try sendDirectMessageSingle(self, chat_jid, text);
         return;
     }
+
+    std.log.scoped(.SendFanout).debug("Sending fanout message to {d} participants", .{participants.items.len});
 
     var msg_node = try messaging.buildFanoutMessageNode(
         self.allocator,
@@ -249,28 +252,37 @@ pub fn sendDirectMessageFanout(self: anytype, chat_jid: []const u8, text: []cons
 }
 
 pub fn sendDirectMessageSingle(self: anytype, chat_jid: []const u8, text: []const u8) !void {
+    std.log.scoped(.SendDirect).debug("Starting sendDirectMessageSingle to {s}", .{chat_jid});
     var target_jid = chat_jid;
     var target_jid_owned: ?[]u8 = null;
     defer if (target_jid_owned) |owned| self.allocator.free(owned);
 
     if (self.options.tls) {
+        std.log.scoped(.SendDirect).debug("TLS mode enabled, resolving encryption JID for {s}", .{chat_jid});
         try ensureRecipientLidMapping(self, chat_jid);
         const resolved = try self.address_book.resolveEncryptionJid(chat_jid);
         target_jid = resolved.value;
         target_jid_owned = resolved.owned;
+        std.log.scoped(.SendDirect).debug("Resolved encryption JID: {s}", .{target_jid});
     }
 
     const route_jid = try bareJid(self, target_jid);
     defer self.allocator.free(route_jid);
+    std.log.scoped(.SendDirect).debug("Route JID: {s}, Target JID: {s}", .{ route_jid, target_jid });
 
     const plaintext = try messaging.encodeTextMessageInto(&self.send_text_buf, self.allocator, text);
+    std.log.scoped(.SendDirect).debug("Encoded plaintext message ({d} bytes)", .{plaintext.len});
+    
     const payload = try encryptPayloadForFanoutTarget(self, route_jid, target_jid, plaintext);
-    defer {
+    errdefer {
         self.allocator.free(payload.ciphertext);
         if (payload.route_jid_owned) |owned| self.allocator.free(owned);
     }
+    std.log.scoped(.SendDirect).debug("Encrypted payload ({d} bytes, is_prekey={any})", .{ payload.ciphertext.len, payload.is_prekey });
 
     const msg_id_arr = messaging.generateMessageId(self.io);
+    std.log.scoped(.SendDirect).debug("Sending direct message with ID {s}", .{msg_id_arr[0..]});
+    
     try transport.sendDirectMessageFast(
         self,
         chat_jid,
@@ -280,6 +292,7 @@ pub fn sendDirectMessageSingle(self: anytype, chat_jid: []const u8, text: []cons
         payload.is_prekey,
         if (payload.is_prekey) self.account_device_identity else null,
     );
+    std.log.scoped(.SendDirect).info("Successfully sent direct message to {s}", .{chat_jid});
 }
 
 pub fn encryptPayloadForFanoutTarget(
