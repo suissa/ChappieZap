@@ -212,18 +212,29 @@ pub fn sendDirectMessageFanout(self: anytype, chat_jid: []const u8, text: []cons
     std.log.scoped(.SendFanout).debug("Processing {d} recipient targets", .{recipient_targets.items.len});
     for (recipient_targets.items) |participant_jid| {
         std.log.scoped(.SendFanout).debug("Encrypting for recipient target: {s}", .{participant_jid});
-        var encryption_jid = participant_jid;
+        
+        // Ensure participant_jid is a full JID, not just a bare number
+        var full_recipient_jid_buf: [128]u8 = undefined;
+        var full_recipient_jid: []const u8 = participant_jid;
+        if (!std.mem.indexOf(u8, participant_jid, "@")) |_| {
+            // This is a bare number, need to append @s.whatsapp.net
+            const full_jid = std.fmt.bufPrint(&full_recipient_jid_buf, "{s}@s.whatsapp.net", .{participant_jid}) catch return error.InvalidJid;
+            full_recipient_jid = full_jid;
+            std.log.scoped(.SendFanout).debug("Converted bare JID to full JID: {s}", .{full_recipient_jid});
+        }
+        
+        var encryption_jid = full_recipient_jid;
         var encryption_jid_owned: ?[]u8 = null;
         defer if (encryption_jid_owned) |owned| self.allocator.free(owned);
         if (self.options.tls) {
-            const resolved = try self.address_book.resolveEncryptionJid(participant_jid);
+            const resolved = try self.address_book.resolveEncryptionJid(full_recipient_jid);
             encryption_jid = resolved.value;
             encryption_jid_owned = resolved.owned;
             std.log.scoped(.SendFanout).debug("Resolved encryption JID: {s}", .{encryption_jid});
         }
         const payload = try encryptPayloadForFanoutTarget(
             self,
-            participant_jid,
+            full_recipient_jid,
             encryption_jid,
             recipient_plaintext,
         );
