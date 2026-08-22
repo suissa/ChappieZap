@@ -134,7 +134,9 @@ fn handleEvent(event: whatszig.Event, ctx: *anyopaque) void {
 
                 // Resposta automática se receber ping
                 if (std.mem.indexOf(u8, body, "ping") != null or std.mem.indexOf(u8, body, "Ping") != null) {
-                    sendValidationMessage(client, msg.chat, "🦎 pong! Resposta automática do WhatsZig.");
+                    // Resolve LID chat JID para phone JID antes de enviar
+                    const reply_jid = resolveReplyJid(client, msg.chat) orelse msg.chat;
+                    sendValidationMessage(client, reply_jid, "🦎 pong! Resposta automática do WhatsZig.");
                 }
             } else {
                 log.info("Main", "📩 [SISTEMA/SYNC] Mensagem de protocolo recebida de: {s}", .{msg.from});
@@ -145,6 +147,23 @@ fn handleEvent(event: whatszig.Event, ctx: *anyopaque) void {
         },
         .login_failed => log.err("Main", "❌ Falha no login", .{}),
     }
+}
+
+/// Resolve um LID (ex: 124953718435910:50@lid) para o phone JID correspondente.
+/// Se for o próprio número (self-chat), usa phone_jid direto.
+/// Retorna null se não conseguir resolver (usa o JID original como fallback).
+fn resolveReplyJid(client: *whatszig.Client, chat_jid: []const u8) ?[]const u8 {
+    // Se for self-chat (próprio número), use sempre phone_jid
+    if (client.address_book.isSelfChatJid(chat_jid)) {
+        return client.phone_jid;
+    }
+    // Tenta resolver LID -> phone JID via address_book
+    const resolved = client.address_book.resolvePhoneJid(chat_jid) catch return null;
+    // Se resolveu para um phone JID diferente, retorna ele
+    if (!std.mem.eql(u8, resolved.value, chat_jid)) {
+        return resolved.value;
+    }
+    return null;
 }
 
 fn sendValidationMessage(client: *whatszig.Client, to_jid: []const u8, text: []const u8) void {
