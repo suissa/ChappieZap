@@ -65,24 +65,39 @@ pub fn sendSelfChatFanout(self: anytype, chat_jid: []const u8, text: []const u8)
     }
 
     if (participants.items.len == 0) {
-        // No other devices to send to - send directly to self using LID
-        const resolved = try self.address_book.resolveEncryptionJid(chat_jid);
-        defer resolved.deinit(self.allocator);
-        // Use sendDirectMessageSingle for direct delivery when no fanout targets
-        const msg_id_arr = messaging.generateMessageId(self.io);
-        const route_jid = try bareJid(self, resolved.value);
+        // No other devices to send to - send directly using DeviceSentMessage format
+        std.log.scoped(.SendFanout).warn("No fanout participants for self-chat to {s}, sending via direct path", .{chat_jid});
+        
+        // For self-chat with no other devices, we need to send as DeviceSentMessage
+        // Use the LID JID for encryption when in TLS mode
+        var target_jid = chat_jid;
+        var target_jid_owned: ?[]u8 = null;
+        defer if (target_jid_owned) |owned| self.allocator.free(owned);
+        
+        if (self.options.tls) {
+            const resolved = try self.address_book.resolveEncryptionJid(chat_jid);
+            target_jid = resolved.value;
+            target_jid_owned = resolved.owned;
+            std.log.scoped(.SendFanout).debug("Resolved self-chat target to: {s}", .{target_jid});
+        }
+        
+        const route_jid = try bareJid(self, target_jid);
         defer self.allocator.free(route_jid);
+        
+        const msg_id_arr = messaging.generateMessageId(self.io);
         
         const payload = try encryptPayloadForFanoutTarget(
             self,
             route_jid,
-            resolved.value,
+            target_jid,
             plaintext,
         );
         defer {
             self.allocator.free(payload.ciphertext);
             if (payload.route_jid_owned) |owned| self.allocator.free(owned);
         }
+        
+        std.log.scoped(.SendFanout).debug("Sending self-chat message (prekey={any}) to {s} via route {s}", .{ payload.is_prekey, chat_jid, payload.route_jid });
         
         try transport.sendDirectMessageFast(
             self,
@@ -93,6 +108,7 @@ pub fn sendSelfChatFanout(self: anytype, chat_jid: []const u8, text: []const u8)
             payload.is_prekey,
             if (payload.is_prekey) self.account_device_identity else null,
         );
+        std.log.scoped(.SendFanout).info("Self-chat message sent successfully to {s}", .{chat_jid});
         return;
     }
 
