@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WhatsmeowDevice",
+  "type": "object",
+  "properties": {
+    "jid": {
+      "type": "string",
+      "description": "JID of the connected WhatsApp companion device (e.g. 5515991957645:56@s.whatsapp.net)"
+    },
+    "lid": {
+      "type": ["string", "null"],
+      "description": "LID of the connected WhatsApp companion device (e.g. 124953718435910:56@lid)"
+    },
+    "facebook_uuid": {
+      "type": ["string", "null"]
+    },
+    "registration_id": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "noise_key": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "description": "32-byte Noise static private key"
+    },
+    "identity_key": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "description": "32-byte Signal identity private key"
+    },
+    "signed_pre_key": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "description": "32-byte Signed pre-key private key"
+    },
+    "signed_pre_key_id": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 16777215
+    },
+    "signed_pre_key_sig": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "description": "64-byte Signed pre-key signature"
+    },
+    "adv_key": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "description": "32-byte ADV secret key"
+    },
+    "adv_details": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "description": "Serialized ADVSignedDeviceIdentity details"
+    },
+    "adv_account_sig": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "description": "64-byte Account signature"
+    },
+    "adv_account_sig_key": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "description": "32-byte Account signature key"
+    },
+    "adv_device_sig": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "description": "64-byte Device signature"
+    },
+    "platform": {
+      "type": "string",
+      "default": "whatszig"
+    },
+    "business_name": {
+      "type": "string",
+      "default": ""
+    },
+    "push_name": {
+      "type": "string",
+      "default": "whatszig"
+    },
+    "lid_migration_ts": {
+      "type": "integer",
+      "default": 0
+    },
+    "companion_meta_nonce": {
+      "type": "string",
+      "default": ""
+    }
+  },
+  "required": [
+    "jid",
+    "registration_id",
+    "noise_key",
+    "identity_key",
+    "signed_pre_key",
+    "signed_pre_key_id",
+    "signed_pre_key_sig",
+    "adv_key",
+    "adv_details",
+    "adv_account_sig",
+    "adv_account_sig_key",
+    "adv_device_sig"
+  ]
+}

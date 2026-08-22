@@ -247,6 +247,7 @@ pub fn handlePairSuccess(self: anytype, node: *const binary.Node) !void {
         u8,
         pair_crypto.self_signed_identity_bytes,
     );
+    self.saveDeviceToDb() catch {};
 
     var response = try pair_mod.buildPairDeviceSignResponse(
         self.allocator,

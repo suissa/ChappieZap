@@ -14,8 +14,10 @@ const prekey_flow = @import("client/prekeys.zig");
 const bootstrap = @import("client/bootstrap.zig");
 const stanza_processor = @import("client/stanza_processor.zig");
 const send_fanout = @import("client/send_fanout.zig");
-const session_store = @import("client/session_store.zig");
+pub const session_store = @import("client/session_store.zig");
 const wire_transport = @import("client/transport.zig");
+const jid_helpers = @import("client/jid_helpers.zig");
+const storage = @import("storage");
 const log = @import("log");
 
 pub const Event = events.Event;
@@ -39,6 +41,7 @@ pub const ClientOptions = struct {
     pairing_mode: PairingMode = .qrcode,
     pairing_phone_number: ?[]const u8 = null,
     pairing_timeout_ms: u32 = 600_000,
+    db_path: ?[:0]const u8 = "whatsapp.db",
     experimental_post_login_init: bool = false,
     on_event: ?EventHandler = null,
     event_context: ?*anyopaque = null,
@@ -50,6 +53,8 @@ pub const Client = struct {
     options: ClientOptions,
     ws_client: ws.WebSocketClient,
     noise_socket: ?socket_mod.NoiseSocket = null,
+    store: ?storage.WhatsStore = null,
+    is_saved_session: bool = false,
     static_keypair: xed25519.XEd25519.KeyPair,
     iq_counter: u32 = 0,
     request_id_prefix_len: u8 = 0,
@@ -148,12 +153,22 @@ pub const Client = struct {
         });
         const address_book = addressing.AddressBook.init(allocator);
 
-        return .{
+        var store_opt: ?storage.WhatsStore = null;
+        if (options.db_path) |db_p| {
+            store_opt = storage.WhatsStore.init(db_p) catch |err| blk: {
+                log.warn("Client/Storage", "Could not open SQLite database at {s}: {}", .{ db_p, err });
+                break :blk null;
+            };
+        }
+
+        var client = Client{
             .allocator = allocator,
             .io = io,
             .options = options,
             .ws_client = try ws.WebSocketClient.init(allocator, io),
             .address_book = address_book,
+            .store = store_opt,
+            .is_saved_session = false,
             .static_keypair = xed25519.XEd25519.KeyPair.generate(io),
             .request_id_prefix_len = @intCast(request_id_prefix_slice.len),
             .request_id_prefix = request_id_prefix,
@@ -168,12 +183,21 @@ pub const Client = struct {
             .send_pack_buf = .empty,
             .recv_unpack_buf = .empty,
         };
+
+        if (options.pairing_phone_number) |phone| {
+            if (client.loadDeviceFromDb(phone) catch false) {
+                log.info("Client", "Loaded existing saved session from database for {s}", .{phone});
+            }
+        }
+
+        return client;
     }
 
     pub fn deinit(self: *Client) void {
         if (self.pair_code_phone) |p| self.allocator.free(p);
         if (self.pair_code_ref) |ref| self.allocator.free(ref);
         if (self.account_device_identity) |bytes| self.allocator.free(bytes);
+        if (self.store) |*s| s.deinit();
         session_store.deinitSessionShards(&self.session_shards, self.allocator);
         self.send_text_buf.deinit(self.allocator);
         self.send_text_aux_buf.deinit(self.allocator);
@@ -182,6 +206,81 @@ pub const Client = struct {
         self.address_book.deinit();
         if (self.noise_socket) |*ns| ns.deinit();
         self.ws_client.deinit();
+    }
+
+    pub fn saveDeviceToDb(self: *Client) !void {
+        const store_inst = self.store orelse return;
+        const pj = self.phone_jid orelse return;
+        const adi = self.account_device_identity orelse "";
+
+        const record = storage.DeviceRecord{
+            .jid = pj,
+            .lid = self.lid,
+            .registration_id = self.registration_id,
+            .noise_key = self.static_keypair.x25519_private,
+            .identity_key = self.identity.key_pair.private,
+            .signed_pre_key = self.signed_prekey.key_pair.private,
+            .signed_pre_key_id = self.signed_prekey.id,
+            .signed_pre_key_sig = self.signed_prekey.signature,
+            .adv_key = self.adv_secret_key,
+            .adv_details = adi,
+            .adv_account_sig = [_]u8{0} ** 64,
+            .adv_account_sig_key = [_]u8{0} ** 32,
+            .adv_device_sig = [_]u8{0} ** 64,
+            .platform = "whatszig",
+            .push_name = "whatszig",
+        };
+        try store_inst.saveDevice(record);
+        log.info("Client/Storage", "Saved device session to SQLite for {s}", .{pj});
+    }
+
+    pub fn loadDeviceFromDb(self: *Client, phone: []const u8) !bool {
+        const store_inst = self.store orelse return false;
+        var record = (try store_inst.getDevice(self.allocator, phone)) orelse return false;
+        defer record.deinit(self.allocator);
+
+        // Reconstruct keys from loaded private keys
+        const crypto = std.crypto;
+        const x25519_pub = (crypto.ecc.Curve25519.basePoint.clampedMul(record.noise_key) catch return error.InvalidNoiseKey).toBytes();
+        const ed_keypair = crypto.sign.Ed25519.KeyPair.generateDeterministic(record.noise_key) catch return error.InvalidNoiseKey;
+        self.static_keypair = .{
+            .x25519_private = record.noise_key,
+            .x25519_public = x25519_pub,
+            .ed25519_private = ed_keypair.secret_key,
+            .ed25519_public = ed_keypair.public_key.toBytes(),
+        };
+
+        const ident_pub = (crypto.ecc.Curve25519.basePoint.clampedMul(record.identity_key) catch return error.InvalidIdentityKey).toBytes();
+        self.identity = .{
+            .key_pair = .{
+                .private = record.identity_key,
+                .public = ident_pub,
+            },
+        };
+
+        const spk_pub = (crypto.ecc.Curve25519.basePoint.clampedMul(record.signed_pre_key) catch return error.InvalidPreKey).toBytes();
+        self.signed_prekey = .{
+            .id = record.signed_pre_key_id,
+            .key_pair = .{
+                .private = record.signed_pre_key,
+                .public = spk_pub,
+            },
+            .signature = record.signed_pre_key_sig,
+        };
+
+        self.registration_id = record.registration_id;
+        self.adv_secret_key = record.adv_key;
+        self.device_id = jid_helpers.extractDeviceId(record.jid);
+
+        if (self.account_device_identity) |old| self.allocator.free(old);
+        self.account_device_identity = try self.allocator.dupe(u8, record.adv_details);
+
+        try self.address_book.setOwnIdentity(record.jid, record.lid orelse "", self.device_id);
+        session_store.syncIdentityAliases(self);
+
+        self.is_saved_session = true;
+        log.info("Client/Storage", "Loaded saved session from SQLite for {s} (device {d})", .{ record.jid, self.device_id });
+        return true;
     }
 
     fn runExperimentalPostLoginBootstrap(self: *Client) void {
@@ -208,8 +307,34 @@ pub const Client = struct {
     // --- Public API ---
 
     /// Full connection flow: pair → reconnect → login → prekeys → event loop.
+    /// If an existing session is loaded from database, skips pairing entirely and logs in directly.
     /// Blocks until disconnected. Dispatches events to the handler.
     pub fn connectAndRun(self: *Client) !void {
+        if (self.is_saved_session) {
+            log.info("Client", "Connecting with saved session for {s} (device {d})...", .{
+                self.phone_jid orelse "?",
+                self.device_id,
+            });
+            try wire_transport.connectWithPayload(self, .login);
+            try auth_flow.readUntilLogin(self);
+            self.runExperimentalPostLoginBootstrap();
+            wire_transport.uploadPrekeysAndWait(self, 10_000) catch |err| {
+                log.warn("Client", "Post-login prekey upload did not confirm: {}", .{err});
+            };
+            wire_transport.sendActiveAndWait(self, 10_000) catch |err| {
+                log.warn("Client", "Post-login active IQ did not confirm: {}", .{err});
+            };
+            self.runExperimentalPostLoginPresence();
+
+            self.emit(.{ .connected = .{
+                .phone_jid = self.phone_jid orelse "",
+                .lid = self.lid orelse "",
+            } });
+
+            event_pump.runMessageLoop(self);
+            return;
+        }
+
         try wire_transport.connectWithPayload(self, .pairing);
         try auth_flow.handlePairingFlow(self);
         try wire_transport.connectWithPayload(self, .login);
@@ -222,6 +347,10 @@ pub const Client = struct {
             log.warn("Client", "Post-login active IQ did not confirm: {}", .{err});
         };
         self.runExperimentalPostLoginPresence();
+
+        self.saveDeviceToDb() catch |err| {
+            log.warn("Client", "Failed to save paired device to SQLite: {}", .{err});
+        };
 
         self.emit(.{ .connected = .{
             .phone_jid = self.phone_jid orelse "",

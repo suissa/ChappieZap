@@ -17,6 +17,7 @@ pub const signal = @import("signal");
 pub const log = @import("log");
 pub const qr = @import("qr");
 pub const pair_code = @import("pair_code");
+pub const storage = @import("storage");
 
 test {
     _ = @import("noise");
@@ -30,4 +31,5 @@ test {
     _ = @import("usync");
     _ = @import("qr");
     _ = @import("pair_code");
+    _ = @import("storage");
 }

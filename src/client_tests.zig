@@ -439,3 +439,48 @@ test "buildLoginPayload correctly extracts username when phone_jid has companion
     try std.testing.expectEqual(@as(?u64, 5515991957645), payload.username);
     try std.testing.expectEqual(@as(?u32, 53), payload.device);
 }
+
+test "integration: Client saveDeviceToDb and loadDeviceFromDb roundtrip via SQLite" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var client1 = try client_mod.Client.init(allocator, io, .{
+        .db_path = ":memory:",
+    });
+    defer client1.deinit();
+
+    try client1.address_book.setOwnIdentity("5515991957645:56@s.whatsapp.net", "124953718435910:56@lid", 56);
+    client_mod.session_store.syncIdentityAliases(&client1);
+    client1.account_device_identity = try allocator.dupe(u8, "test_adv_identity");
+
+    try client1.saveDeviceToDb();
+
+    // Now verify the device record can be loaded from the db
+    const loaded = try client1.store.?.getDevice(allocator, "5515991957645");
+    try std.testing.expect(loaded != null);
+    var dev = loaded.?;
+    defer dev.deinit(allocator);
+
+    try std.testing.expectEqualStrings("5515991957645:56@s.whatsapp.net", dev.jid);
+    try std.testing.expectEqualStrings("124953718435910:56@lid", dev.lid.?);
+
+    // Create client2 using the same db handle
+    var client2 = try client_mod.Client.init(allocator, io, .{
+        .db_path = null, // don't open new db
+    });
+    client2.store = client1.store;
+    defer {
+        client2.store = null; // client1 will close it
+        client2.deinit();
+    }
+
+    const loaded_ok = try client2.loadDeviceFromDb("5515991957645");
+    try std.testing.expect(loaded_ok);
+    try std.testing.expect(client2.is_saved_session);
+    try std.testing.expectEqualStrings("5515991957645:56@s.whatsapp.net", client2.phone_jid.?);
+    try std.testing.expectEqualStrings("124953718435910:56@lid", client2.lid.?);
+    try std.testing.expectEqual(@as(u32, 56), client2.device_id);
+    try std.testing.expectEqualSlices(u8, &client1.static_keypair.x25519_private, &client2.static_keypair.x25519_private);
+    try std.testing.expectEqualSlices(u8, &client1.identity.key_pair.private, &client2.identity.key_pair.private);
+    try std.testing.expectEqualSlices(u8, &client1.signed_prekey.key_pair.private, &client2.signed_prekey.key_pair.private);
+}

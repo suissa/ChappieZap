@@ -12,3 +12,6 @@ dist/
 /*.xml
 *.txt
 qrcode.html
+*.db
+*.db-shm
+*.db-wal
