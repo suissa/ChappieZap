@@ -122,13 +122,21 @@ fn handleEvent(event: whatszig.Event, ctx: *anyopaque) void {
         },
         .message => |msg| {
             if (msg.getBody()) |body| {
+                const is_self = client.address_book.isSelfChatJid(msg.chat) or client.address_book.isSelfChatJid(msg.from);
                 log.info("Main", "", .{});
                 log.info("Main", "┌──────────────────────────────────────────────────────────", .{});
-                log.info("Main", "│ 📩 MENSAGEM RECEBIDA", .{});
+                if (is_self) {
+                    log.info("Main", "│ 📩 MENSAGEM RECEBIDA (AUTO-ENVIO / SELF-CHAT CONFIRMADO)", .{});
+                } else {
+                    log.info("Main", "│ 📩 MENSAGEM RECEBIDA", .{});
+                }
                 log.info("Main", "│ De:    {s}", .{msg.from});
                 log.info("Main", "│ Chat:  {s}", .{msg.chat});
                 log.info("Main", "│ ID:    {s}", .{msg.id});
                 log.info("Main", "│ Texto: \"{s}\"", .{body});
+                if (is_self) {
+                    log.info("Main", "│ ✅ RECEBIMENTO CONFIRMADO VIA CLIENT WHATSZIG!", .{});
+                }
                 log.info("Main", "└──────────────────────────────────────────────────────────", .{});
                 log.info("Main", "", .{});
 
