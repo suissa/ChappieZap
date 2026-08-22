@@ -115,9 +115,10 @@ fn handleEvent(event: whatszig.Event, ctx: *anyopaque) void {
             log.info("Main", "====================================================", .{});
             log.info("Main", "", .{});
 
-            // Envio automático de validação para o próprio número (self-chat)
-            if (c.phone_jid.len > 0) {
-                sendValidationMessage(client, c.phone_jid, "⚡ [WhatsZig] Sessão conectada com sucesso! Envie 'ping' ou qualquer mensagem para testar o recebimento.");
+            // Envio automático de validação para o número de teste
+            const test_number = "5515997676610";
+            if (test_number.len > 0) {
+                sendValidationMessage(client, test_number, "⚡ [WhatsZig] Sessão conectada com sucesso! Envie 'ping' ou qualquer mensagem para testar o recebimento.");
             }
         },
         .message => |msg| {
