@@ -1,15 +1,14 @@
-```
-# Build artifacts
+
 zig-cache/
 zig-out/
 *.o
 *.obj
 *.a
-*.lib
-*.so
-*.dylib
-*.dll
+*.out
 
+.zig-cache/
+zig-out/
+zig-pkg/
 # Dependencies
 deps/
 
@@ -32,4 +31,3 @@ deps/
 # OS
 .DS_Store
 Thumbs.db
-```
