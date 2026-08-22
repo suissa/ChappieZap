@@ -333,6 +333,19 @@ pub fn sendDirectMessageSingle(self: anytype, chat_jid: []const u8, text: []cons
     defer self.allocator.free(route_jid);
     std.log.scoped(.SendDirect).debug("Route JID: {s}, Target JID: {s}", .{ route_jid, target_jid });
 
+    // Check if session exists, if not establish it first
+    {
+        var locked = try session_store.lockSession(self, target_jid);
+        defer locked.unlock();
+        if (locked.get() == null) {
+            std.log.scoped(.SendDirect).info("No session found for {s}, establishing session with prekeys...", .{target_jid});
+            try prekey_flow.fetchPrekeysAndEstablishSession(self, target_jid);
+            std.log.scoped(.SendDirect).info("Session established successfully for {s}", .{target_jid});
+        } else {
+            std.log.scoped(.SendDirect).debug("Session already exists for {s}", .{target_jid});
+        }
+    }
+
     const plaintext = try messaging.encodeTextMessageInto(&self.send_text_buf, self.allocator, text);
     std.log.scoped(.SendDirect).debug("Encoded plaintext message ({d} bytes)", .{plaintext.len});
     
