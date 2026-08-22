@@ -182,15 +182,15 @@ pub fn sendDirectMessageFanout(self: anytype, chat_jid: []const u8, text: []cons
     while (own_it.next()) |jid_ptr| {
         std.log.scoped(.SendFanout).debug("Checking own device JID: {s}", .{jid_ptr.*});
         if (std.mem.eql(u8, jid_ptr.*, chat_jid)) {
-            std.log.scoped(.SendFanout).debug("Skipping - equals chat_jid");
+            std.log.scoped(.SendFanout).debug("Skipping - equals chat_jid", .{});
             continue;
         }
         if (self.address_book.isCurrentDeviceJid(jid_ptr.*)) {
-            std.log.scoped(.SendFanout).debug("Skipping - is current device JID");
+            std.log.scoped(.SendFanout).debug("Skipping - is current device JID", .{});
             continue;
         }
         if (jid_helpers.containsJid(own_targets.items, jid_ptr.*)) {
-            std.log.scoped(.SendFanout).debug("Skipping - already in targets");
+            std.log.scoped(.SendFanout).debug("Skipping - already in targets", .{});
             continue;
         }
         try own_targets.append(self.allocator, jid_ptr.*);
