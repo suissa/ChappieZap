@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WhatsmeowPreKeys",
+  "type": "object",
+  "properties": {
+    "jid": {
+      "type": "string"
+    },
+    "key_id": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 16777215
+    },
+    "key": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "description": "32-byte PreKey private key"
+    },
+    "uploaded": {
+      "type": "boolean"
+    }
+  },
+  "required": ["jid", "key_id", "key", "uploaded"]
+}

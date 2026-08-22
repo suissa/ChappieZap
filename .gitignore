@@ -1,4 +1,3 @@
-```
 zig-cache/
 *.o
 *.obj
@@ -7,4 +6,4 @@ zig-cache/
 *.so
 *.a
 *.out
-```
+

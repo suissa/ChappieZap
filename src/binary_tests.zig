@@ -386,3 +386,19 @@ test "node with children encoding/decoding" {
     try std.testing.expectEqualStrings("type", decoded_presence.attributes.items[0].key);
     try std.testing.expectEqualStrings("available", decoded_presence.attributes.items[0].value);
 }
+
+test "AD_JID with LID roundtrip" {
+    const allocator = std.testing.allocator;
+    var buffer: [256]u8 = undefined;
+    var writer = binary.BinaryWriter.init(&buffer);
+
+    const lid_device_jid = "124953718435910:50@lid";
+    _ = try binary.encodeJid(lid_device_jid, &writer);
+    const encoded = writer.getWritten();
+
+    var reader = binary.BinaryReader.init(encoded);
+    const decoded = try binary.decodeString(&reader, allocator);
+    defer allocator.free(decoded);
+
+    try std.testing.expectEqualStrings(lid_device_jid, decoded);
+}
