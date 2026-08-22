@@ -216,7 +216,7 @@ pub fn sendDirectMessageFanout(self: anytype, chat_jid: []const u8, text: []cons
         // Ensure participant_jid is a full JID, not just a bare number
         var full_recipient_jid_buf: [128]u8 = undefined;
         var full_recipient_jid: []const u8 = participant_jid;
-        if (!std.mem.indexOf(u8, participant_jid, "@")) |_| {
+        if (std.mem.indexOf(u8, participant_jid, "@") == null) {
             // This is a bare number, need to append @s.whatsapp.net
             const full_jid = std.fmt.bufPrint(&full_recipient_jid_buf, "{s}@s.whatsapp.net", .{participant_jid}) catch return error.InvalidJid;
             full_recipient_jid = full_jid;
