@@ -1,35 +1,5 @@
 ```
-# Build artifacts
 zig-cache/
-zig-out/
 *.o
 *.obj
-*.a
-*.lib
-*.so
-*.dylib
-*.dll
-
-# Dependencies
-deps/
-
-# Logs and temp files
-*.log
-*.tmp
-*.swp
-
-# Environment
-.env
-.env.local
-*.env.*
-
-# Editors
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
 ```
