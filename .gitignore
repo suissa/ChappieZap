@@ -1,17 +1,9 @@
-.zig-cache
-zig-out
-zig-pkg
+zig-cache/
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.a
+*.out
 
-# Node.js
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.npm/
-dist/
-/*.xml
-*.txt
-qrcode.html
-*.db
-*.db-shm
-*.db-wal

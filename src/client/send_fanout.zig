@@ -65,9 +65,35 @@ pub fn sendSelfChatFanout(self: anytype, chat_jid: []const u8, text: []const u8)
     }
 
     if (participants.items.len == 0) {
+        // No other devices to send to - send directly to self using LID
         const resolved = try self.address_book.resolveEncryptionJid(chat_jid);
         defer resolved.deinit(self.allocator);
-        return self.sendEncrypted(chat_jid, resolved.value, text, null);
+        // Use sendDirectMessageSingle for direct delivery when no fanout targets
+        const msg_id_arr = messaging.generateMessageId(self.io);
+        const route_jid = try bareJid(self, resolved.value);
+        defer self.allocator.free(route_jid);
+        
+        const payload = try encryptPayloadForFanoutTarget(
+            self,
+            route_jid,
+            resolved.value,
+            plaintext,
+        );
+        defer {
+            self.allocator.free(payload.ciphertext);
+            if (payload.route_jid_owned) |owned| self.allocator.free(owned);
+        }
+        
+        try transport.sendDirectMessageFast(
+            self,
+            chat_jid,
+            payload.route_jid,
+            &msg_id_arr,
+            payload.ciphertext,
+            payload.is_prekey,
+            if (payload.is_prekey) self.account_device_identity else null,
+        );
+        return;
     }
 
     const msg_id_arr = messaging.generateMessageId(self.io);
