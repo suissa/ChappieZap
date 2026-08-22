@@ -296,7 +296,16 @@ pub fn encodeJidStruct(jid: *const JID, writer: *BinaryWriter) BinaryError!usize
             try writer.writeByte(AD_JID);
             total_bytes += 1;
 
-            try writer.writeByte(jid.agent);
+            var agent = jid.agent;
+            if (std.mem.eql(u8, jid.server, "lid") or std.mem.eql(u8, jid.server, JID.HIDDEN_USER_SERVER)) {
+                agent |= 1;
+            } else if (std.mem.eql(u8, jid.server, "hosted.lid")) {
+                agent |= 129;
+            } else if (std.mem.eql(u8, jid.server, "hosted") or std.mem.eql(u8, jid.server, JID.HOSTED_SERVER)) {
+                agent |= 128;
+            }
+
+            try writer.writeByte(agent);
             total_bytes += 1;
 
             try writer.writeByte(@as(u8, @intCast(jid.device)));

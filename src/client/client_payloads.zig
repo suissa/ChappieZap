@@ -87,9 +87,11 @@ pub fn buildPairingPayload(self: anytype) ![]u8 {
 pub fn buildLoginPayload(self: anytype) ![]u8 {
     var username: ?u64 = null;
     if (self.phone_jid) |pj| {
-        if (std.mem.indexOf(u8, pj, "@")) |at| {
-            username = std.fmt.parseInt(u64, pj[0..at], 10) catch null;
-        }
+        const at = std.mem.indexOfScalar(u8, pj, '@') orelse pj.len;
+        const user_part = pj[0..at];
+        const colon = std.mem.indexOfScalar(u8, user_part, ':') orelse user_part.len;
+        const bare_user = user_part[0..colon];
+        username = std.fmt.parseInt(u64, bare_user, 10) catch null;
     }
 
     log.debug("Client", "Building login payload: username={?}, device={d}", .{ username, self.device_id });

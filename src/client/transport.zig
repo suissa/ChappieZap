@@ -595,6 +595,39 @@ test "encodeAck matches node encoder" {
     try std.testing.expectEqualSlices(u8, slow_writer.getWritten(), fast_writer.getWritten());
 }
 
+test "encodeAck for message from LID chat" {
+    const allocator = std.testing.allocator;
+
+    var incoming = try binary.Node.init(allocator, "message");
+    defer incoming.deinit();
+    try incoming.addAttribute("id", "3EB06BA6B117F27515F0D4");
+    try incoming.addAttribute("from", "124953718435910:50@lid");
+
+    var fast_buf: [256]u8 = undefined;
+    var fast_writer = binary.BinaryWriter.init(&fast_buf);
+    var fake = struct {
+        address_book: struct {
+            fn phoneJid(_: @This()) ?[]const u8 {
+                return "5515991957645@s.whatsapp.net";
+            }
+        } = .{},
+    }{};
+    try encodeAck(&fake, &fast_writer, &incoming);
+
+    var ack = binary.Node.initBorrowed(allocator, "ack");
+    defer ack.deinit();
+    try ack.addAttributeBorrowed("class", incoming.tag);
+    try ack.addAttributeBorrowed("id", incoming.getAttribute("id").?);
+    try ack.addAttributeBorrowed("to", incoming.getAttribute("from").?);
+    try ack.addAttributeBorrowed("from", "5515991957645@s.whatsapp.net");
+
+    var slow_buf: [256]u8 = undefined;
+    var slow_writer = binary.BinaryWriter.init(&slow_buf);
+    _ = try binary.encodeNode(&ack, &slow_writer);
+
+    try std.testing.expectEqualSlices(u8, slow_writer.getWritten(), fast_writer.getWritten());
+}
+
 test "encodeDeliveryReceipt matches node encoder" {
     const allocator = std.testing.allocator;
 

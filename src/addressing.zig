@@ -27,6 +27,10 @@ pub const AddressBook = struct {
     }
 
     pub fn deinit(self: *AddressBook) void {
+        if (self.own_phone_jid) |p| self.allocator.free(p);
+        if (self.own_lid_jid) |l| self.allocator.free(l);
+        self.own_phone_jid = null;
+        self.own_lid_jid = null;
         self.pn_to_lid.deinit();
         self.lid_to_pn.deinit();
         self.own_devices.deinit();
@@ -66,18 +70,18 @@ pub const AddressBook = struct {
         device_id: u32,
     ) !void {
         _ = try learn.rememberMapping(self, lid_jid, phone_jid);
-        self.own_phone_jid = try mapStoredJid(self.lid_to_pn, lid_jid);
-        self.own_lid_jid = try mapStoredJid(self.pn_to_lid, phone_jid);
+        if (self.own_phone_jid) |old| self.allocator.free(old);
+        if (self.own_lid_jid) |old| self.allocator.free(old);
+        self.own_phone_jid = try self.allocator.dupe(u8, phone_jid);
+        self.own_lid_jid = try self.allocator.dupe(u8, lid_jid);
         self.own_device_id = device_id;
     }
 
     pub fn setOwnLid(self: *AddressBook, lid_jid: []const u8) !void {
+        if (self.own_lid_jid) |old| self.allocator.free(old);
+        self.own_lid_jid = try self.allocator.dupe(u8, lid_jid);
         if (self.own_phone_jid) |phone_jid| {
-            const phone_snapshot = try self.allocator.dupe(u8, phone_jid);
-            defer self.allocator.free(phone_snapshot);
-            _ = try learn.rememberMapping(self, lid_jid, phone_snapshot);
-            self.own_phone_jid = try mapStoredJid(self.lid_to_pn, lid_jid);
-            self.own_lid_jid = try mapStoredJid(self.pn_to_lid, phone_snapshot);
+            _ = try learn.rememberMapping(self, lid_jid, phone_jid);
         }
     }
 

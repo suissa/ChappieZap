@@ -179,6 +179,35 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const qr_mod = b.addModule("qr", .{
+        .root_source_file = b.path("src/qr.zig"),
+        .target = target,
+    });
+
+    const pair_code_mod = b.addModule("pair_code", .{
+        .root_source_file = b.path("src/pair_code.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "binary", .module = binary_mod },
+        },
+    });
+
+    const storage_mod = b.addModule("storage", .{
+        .root_source_file = b.path("Planes/Storage/src/root.zig"),
+        .target = target,
+    });
+    storage_mod.addIncludePath(b.path("Planes/Storage/c"));
+    storage_mod.addCSourceFile(.{
+        .file = b.path("Planes/Storage/c/sqlite3.c"),
+        .flags = &.{
+            "-DSQLITE_THREADSAFE=1",
+            "-DSQLITE_ENABLE_FTS5=1",
+            "-DSQLITE_ENABLE_RTREE=1",
+            "-DSQLITE_DQS=0",
+        },
+    });
+    storage_mod.link_libc = true;
+
     const client_mod = b.addModule("client", .{
         .root_source_file = b.path("src/client.zig"),
         .target = target,
@@ -193,6 +222,9 @@ pub fn build(b: *std.Build) void {
             .{ .name = "prekey", .module = prekey_mod },
             .{ .name = "messaging", .module = messaging_mod },
             .{ .name = "pair", .module = pair_mod },
+            .{ .name = "pair_code", .module = pair_code_mod },
+            .{ .name = "storage", .module = storage_mod },
+            .{ .name = "qr", .module = qr_mod },
             .{ .name = "whatsapp_proto", .module = wa_proto_mod },
             .{ .name = "events", .module = events_mod },
             .{ .name = "addressing", .module = addressing_mod },
@@ -224,8 +256,12 @@ pub fn build(b: *std.Build) void {
             .{ .name = "usync", .module = usync_mod },
             .{ .name = "jid_common", .module = jid_common_mod },
             .{ .name = "log", .module = log_mod },
+            .{ .name = "qr", .module = qr_mod },
+            .{ .name = "pair_code", .module = pair_code_mod },
+            .{ .name = "storage", .module = storage_mod },
         },
     });
+    mod.link_libc = true;
 
     // --- Executable ---
 
@@ -244,6 +280,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    exe.root_module.link_libc = true;
     if (optimize == .ReleaseSmall) {
         exe.link_function_sections = true;
         exe.link_data_sections = true;

@@ -4,6 +4,8 @@ const binary = @import("binary");
 pub const Event = union(enum) {
     /// QR code ready to display for pairing.
     qr_code: QrCode,
+    /// 8-character pairing code for phone number linking.
+    pairing_code: PairingCode,
     /// Device successfully paired.
     pair_success: PairSuccess,
     /// Client fully connected and ready.
@@ -18,6 +20,15 @@ pub const Event = union(enum) {
     pub const QrCode = struct {
         /// Comma-separated: ref,noise_pub_b64,identity_pub_b64,adv_secret_b64
         code: []const u8,
+    };
+
+    pub const PairingCode = struct {
+        /// 8-character raw pairing code (e.g. "ABCDEFGH")
+        code: []const u8,
+        /// Formatted code (e.g. "ABCD-EFGH")
+        formatted_code: []const u8,
+        /// Phone number linked
+        phone: []const u8,
     };
 
     pub const PairSuccess = struct {
