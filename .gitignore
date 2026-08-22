@@ -1,9 +1,3 @@
-zig-cache/
-*.o
-*.obj
-*.exe
-*.dll
-*.so
-*.a
-*.out
-
+```
+.zig-cache/
+```

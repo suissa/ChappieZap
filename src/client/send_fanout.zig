@@ -227,7 +227,11 @@ pub fn sendDirectMessageFanout(self: anytype, chat_jid: []const u8, text: []cons
         });
     }
 
-    if (participants.items.len == 0) return error.NoRecipients;
+    if (participants.items.len == 0) {
+        // No participants for fanout - send directly using single-recipient path
+        try sendDirectMessageSingle(self, chat_jid, text);
+        return;
+    }
 
     var msg_node = try messaging.buildFanoutMessageNode(
         self.allocator,
