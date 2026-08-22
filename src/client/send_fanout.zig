@@ -242,7 +242,7 @@ pub fn sendDirectMessageFanout(self: anytype, chat_jid: []const u8, text: []cons
     for (own_targets.items) |participant_jid| {
         std.log.scoped(.SendFanout).debug("Checking own target: {s}", .{participant_jid});
         if (self.address_book.isCurrentDeviceJid(participant_jid)) {
-            std.log.scoped(.SendFanout).debug("Skipping - is current device");
+            std.log.scoped(.SendFanout).debug("Skipping - is current device", .{});
             continue;
         }
         var encryption_jid = participant_jid;
