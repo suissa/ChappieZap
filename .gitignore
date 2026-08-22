@@ -1,5 +1,5 @@
 ```
-# Zig build artifacts
+# Build artifacts
 zig-cache/
 zig-out/
 *.o
@@ -11,7 +11,6 @@ zig-out/
 *.out
 
 # Dependencies
-.zig-cache/
 deps/
 
 # Logs and temp files
@@ -29,20 +28,4 @@ deps/
 .idea/
 *.swp
 *.swo
-
-# System files
-.DS_Store
-Thumbs.db
-
-# Coverage
-coverage/
-htmlcov/
-.coverage
-
-# Python cache (if any Python files exist in project)
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
 ```
