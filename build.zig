@@ -192,6 +192,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+
     const client_mod = b.addModule("client", .{
         .root_source_file = b.path("src/client.zig"),
         .target = target,
@@ -207,6 +208,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "messaging", .module = messaging_mod },
             .{ .name = "pair", .module = pair_mod },
             .{ .name = "pair_code", .module = pair_code_mod },
+
             .{ .name = "qr", .module = qr_mod },
             .{ .name = "whatsapp_proto", .module = wa_proto_mod },
             .{ .name = "events", .module = events_mod },
@@ -241,6 +243,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "log", .module = log_mod },
             .{ .name = "qr", .module = qr_mod },
             .{ .name = "pair_code", .module = pair_code_mod },
+
         },
     });
 

@@ -23,7 +23,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Usage:
     //   whatszig                           -> QR code mode (no phone)
-    //   whatszig <phone>                   -> QR code mode with phone (default)
+    //   whatszig <phone>                   -> paircode mode (default when phone given)
     //   whatszig <phone> qrcode            -> QR code mode
     //   whatszig <phone> paircode          -> Phone pairing code mode
     var pairing_phone: ?[]const u8 = null;
@@ -31,6 +31,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (args_it.next()) |phone_arg| {
         pairing_phone = phone_arg;
+        pairing_mode = .paircode; // Default to paircode when phone is provided
         log.info("Main", "Phone number: {s}", .{phone_arg});
 
         if (args_it.next()) |mode_arg| {
@@ -39,7 +40,7 @@ pub fn main(init: std.process.Init) !void {
             } else if (std.mem.eql(u8, mode_arg, "qrcode")) {
                 pairing_mode = .qrcode;
             } else {
-                log.warn("Main", "Unknown mode '{s}', defaulting to qrcode. Use 'qrcode' or 'paircode'.", .{mode_arg});
+                log.warn("Main", "Unknown mode '{s}', defaulting to paircode. Use 'qrcode' or 'paircode'.", .{mode_arg});
             }
         }
     }
@@ -114,8 +115,7 @@ fn handleEvent(event: whatszig.Event, ctx: *anyopaque) void {
             log.info("Main", "====================================================", .{});
             log.info("Main", "", .{});
 
-            // Envio automático de validação para os números solicitados
-            sendValidationMessage(client, "5515997676610@s.whatsapp.net", "⚡ [WhatsZig] Conexão iniciada com sucesso! Teste de envio.");
+            // Envio automático de validação para o próprio número (self-chat)
             if (c.phone_jid.len > 0) {
                 sendValidationMessage(client, c.phone_jid, "⚡ [WhatsZig] Sessão conectada com sucesso! Envie 'ping' ou qualquer mensagem para testar o recebimento.");
             }

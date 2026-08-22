@@ -109,10 +109,12 @@ pub fn processMessageNode(self: anytype, node: *const binary.Node) ProcessedMess
     if (decrypted != null) {
         client_transport.sendDeliveryReceipt(self, node) catch |err| {
             if (isBenignSendShutdownError(err)) return processed;
-            log.warn("Client/Receipt", "Failed to send delivery receipt for {s}: {}", .{
-                node.getAttribute("id") orelse "",
-                err,
-            });
+            if (err != error.NoDeliveryReceipt) {
+                log.warn("Client/Receipt", "Failed to send delivery receipt for {s}: {}", .{
+                    node.getAttribute("id") orelse "",
+                    err,
+                });
+            }
         };
     }
 
