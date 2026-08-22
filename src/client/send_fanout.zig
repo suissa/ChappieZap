@@ -290,6 +290,13 @@ pub fn sendDirectMessageFanout(self: anytype, chat_jid: []const u8, text: []cons
         return;
     }
 
+    // Special case: only one recipient and it's not our own device - use direct send
+    if (participants.items.len == 1 and own_targets.items.len == 0) {
+        std.log.scoped(.SendFanout).info("Single recipient detected, using direct send path for better compatibility", .{});
+        try sendDirectMessageSingle(self, chat_jid, text);
+        return;
+    }
+
     std.log.scoped(.SendFanout).debug("Sending fanout message to {d} participants", .{participants.items.len});
 
     var msg_node = try messaging.buildFanoutMessageNode(

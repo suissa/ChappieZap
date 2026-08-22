@@ -1,1 +1,10 @@
-*.log
+```
+zig-cache/
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.a
+*.out
+```
